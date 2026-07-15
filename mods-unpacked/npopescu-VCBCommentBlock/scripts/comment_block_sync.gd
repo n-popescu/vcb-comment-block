@@ -168,9 +168,9 @@ func place(cell: Vector2, broadcast: bool) -> void :
 	var k := _key(cell)
 	if _cells.has(k):
 		return
-	var old_texts := _texts.duplicate()
+	var old_cell_texts := _snapshot_cell_texts()
 	_cells[k] = true
-	_reconcile_texts(old_texts)
+	_reconcile_texts(old_cell_texts)
 	emit_signal("blocks_changed")
 	if broadcast and not _applying_remote and _live_session():
 		rpc("_rpc_place", int(cell.x), int(cell.y))
@@ -180,9 +180,9 @@ func remove(cell: Vector2, broadcast: bool) -> void :
 	var k := _key(cell)
 	if not _cells.has(k):
 		return
-	var old_texts := _texts.duplicate()
+	var old_cell_texts := _snapshot_cell_texts()
 	var _e = _cells.erase(k)
-	_reconcile_texts(old_texts)
+	_reconcile_texts(old_cell_texts)
 	emit_signal("blocks_changed")
 	if broadcast and not _applying_remote and _live_session():
 		rpc("_rpc_remove", int(cell.x), int(cell.y))
@@ -208,10 +208,26 @@ func set_text(cell: Vector2, text: String, broadcast: bool) -> void :
 		rpc("_rpc_set_text", int(anchor.x), int(anchor.y), text)
 
 
-# Recompute every group's anchor and keep each group's text at its anchor. When groups merge, the
-# combined group keeps the distinct non-empty texts of the parts (joined by a blank line); when a
-# group splits, whichever component holds the old text-bearing cell keeps it.
-func _reconcile_texts(old_texts: Dictionary) -> void :
+# Snapshot the CURRENT text of every occupied cell (each cell of a non-empty group maps to that
+# group's text), taken BEFORE a place/remove mutates `_cells`. `_reconcile_texts` uses it to carry
+# each group's text onto whatever cells survive — so a comment is only lost when its LAST block is
+# removed, not when the specific anchor (top-left) cell happens to be the one deleted.
+func _snapshot_cell_texts() -> Dictionary:
+	var out := {}
+	for g in _compute_groups():
+		var t := String(_texts.get(_key(_min_cell(g)), ""))
+		if t != "":
+			for c in g:
+				out[_key(c)] = t
+	return out
+
+
+# Recompute every group's anchor and re-home its text there. Each group inherits the text carried
+# by any of its cells in `old_cell_texts` (the pre-mutation per-cell snapshot): so text follows the
+# group as it grows/shrinks/re-anchors, and survives deleting the old anchor cell. When groups merge
+# their distinct non-empty texts are joined by a newline; when a group splits, each surviving piece
+# keeps the text (the comment only disappears once every block of the group is gone).
+func _reconcile_texts(old_cell_texts: Dictionary) -> void :
 	var groups := _compute_groups()
 	var new_texts := {}
 	for g in groups:
@@ -219,8 +235,8 @@ func _reconcile_texts(old_texts: Dictionary) -> void :
 		var parts := []
 		for c in g:
 			var ck := _key(c)
-			if old_texts.has(ck):
-				var t: String = String(old_texts[ck])
+			if old_cell_texts.has(ck):
+				var t: String = String(old_cell_texts[ck])
 				if t != "" and not (t in parts):
 					parts.append(t)
 		if not parts.empty():
