@@ -110,14 +110,13 @@ func _register_comment_ink() -> bool:
 # One-line report of which nodes the wiring is still missing — logged if wiring times out, so the
 # failure is diagnosable from user://ModLoader.log without a debugger.
 func _diagnose() -> String:
-	var inks_ok := _main != null and _main.find_node("Inks", true, false) != null
-	var qm := null
-	if _main != null:
-		qm = _main.get_node_or_null("Interface/GUI/InkSwitchMenu")
-	var qm_ok := qm != null
-	var qm_buttons_ok := qm_ok and ("buttons" in qm) and typeof(qm.buttons) == TYPE_ARRAY and not qm.buttons.empty()
+	var has_main = _main != null
+	var inks_ok = has_main and _main.find_node("Inks", true, false) != null
+	var qm = _main.get_node_or_null("Interface/GUI/InkSwitchMenu") if has_main else null
+	var qm_ok = qm != null
+	var qm_buttons_ok = qm_ok and ("buttons" in qm) and typeof(qm.buttons) == TYPE_ARRAY and not qm.buttons.empty()
 	return "[diag main=%s Inks=%s InkSwitchMenu=%s qm.buttons=%s]" % [
-		_main != null, inks_ok, qm_ok, qm_buttons_ok]
+		has_main, inks_ok, qm_ok, qm_buttons_ok]
 
 
 # Build the always-needed nodes (data model, overlay, editor popup). Returns true once done.

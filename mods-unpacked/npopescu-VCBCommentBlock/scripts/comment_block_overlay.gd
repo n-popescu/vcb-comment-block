@@ -156,7 +156,7 @@ func _process(_delta: float) -> void :
 	if _is_world_frame:
 		var board_pos := get_global_mouse_position()
 		if C.CIRCUIT.RECT.has_point(board_pos):
-			var cell := _sync.cell_of(board_pos)
+			var cell: Vector2 = _sync.cell_of(board_pos)
 			if _sync.has_block(cell):
 				want = true
 				text = _sync.get_text(cell)
@@ -295,7 +295,7 @@ func _ev_mi_mouse_input_on_board(_mode: int, _args: Dictionary) -> void :
 		return
 	if not C.CIRCUIT.RECT.has_point(p_position):
 		return
-	var cell := _sync.cell_of(p_position)
+	var cell: Vector2 = _sync.cell_of(p_position)
 	if p_is_left_click:
 		if p_is_just_pressed:
 			if _sync.has_block(cell):
