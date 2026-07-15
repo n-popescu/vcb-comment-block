@@ -60,9 +60,13 @@ mods use to add their own controls to the circuit-editor panel.
 - **Adjacent blocks (4-neighbour) form one group** = a connected component (`group_cells`, flood
   fill). Each group's text lives at its **anchor** = top-most then left-most cell
   (`anchor_of`/`_min_cell`). `_texts = {"<anchor cx,cy>": text}` — one entry per non-empty group.
-- `place`/`remove` mutate `_cells`, then `_reconcile_texts` recomputes groups and keeps each
-  group's text at its anchor (merging distinct texts on join; the text-bearing component keeps it
-  on split). `set_text` writes at the anchor. `remove_group` clears a whole group.
+- `place`/`remove` first snapshot the text of **every occupied cell** (`_snapshot_cell_texts`: each
+  cell of a non-empty group → that group's text), then mutate `_cells`, then `_reconcile_texts`
+  re-homes each group's text at its (possibly new) anchor by inheriting the text carried by ANY of
+  its cells in that snapshot. So a comment follows its group as it grows/shrinks/re-anchors and is
+  **only lost when the group's LAST block is removed** — deleting the top-left/anchor cell no longer
+  drops it. Merging joins distinct non-empty texts with a newline; splitting keeps the text on each
+  surviving piece. `set_text` writes at the anchor. `remove_group` clears a whole group.
 - Emits `blocks_changed` (overlay redraws) and `text_changed(anchor_key, text)` (open popup on a
   peer updates live).
 
