@@ -129,6 +129,13 @@ appears). There is **no toolbar toggle button** anymore.
 ## 4. Engine / GDScript constraints
 
 - **Godot 3.5.1**, GDScript 3.5 semantics — **not** Godot 4. No Godot-4 syntax.
+- **Never use an RPC keyword as an identifier.** `remote`, `master`, `puppet`, `remotesync`,
+  `mastersync`, `puppetsync`, `sync`, `slave` are reserved GDScript tokens. Naming a variable/param
+  `sync` (e.g. `var sync := ...`) is a **compile error that makes the whole script — and therefore
+  the whole mod — fail to load silently** (this is exactly why the comment block didn't appear until
+  v1.2.1: `mod_main.gd` and `file_system.gd` both had `var sync`). Use `sync_node` etc. You can
+  parse-check locally with `gdtoolkit` (build the parser fresh with `Parser().disable_grammar_caching()`
+  to dodge its stale pickled grammar).
 - **Tabs, not spaces**, in every `.gd`. Quick check: `grep -nP '^\t* +\S' <file>` must be empty
   for lines you add.
 - `C` and `E` are the game's autoloads (always present); `Editor` is a `class_name`. `MP` /
