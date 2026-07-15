@@ -61,7 +61,13 @@ func _process(_delta: float) -> void :
 	if not _quickmenu_wired:
 		_quickmenu_wired = _wire_quickmenu()
 	_wire_frames += 1
-	if (_palette_wired and _quickmenu_wired) or _wire_frames > _WIRE_LIMIT:
+	if _palette_wired and _quickmenu_wired:
+		ModLoaderLog.info("Comment ink added to the ink palette + Q/A quick menu.", MOD_DIR)
+		set_process(false)
+	elif _wire_frames > _WIRE_LIMIT:
+		ModLoaderLog.warning(
+			"Gave up wiring the comment ink (palette=%s, quickmenu=%s)." % [_palette_wired, _quickmenu_wired],
+			MOD_DIR)
 		set_process(false)
 
 
@@ -82,13 +88,15 @@ func _build_core() -> bool:
 	var theme_res = load(MAIN_THEME)
 
 	# 1) The data + MP sync node, at a stable path so rpc() resolves on both peers.
-	var sync: Node = root.get_node_or_null("CommentBlockSync")
-	if sync == null:
-		sync = _new_script(SCRIPTS + "/comment_block_sync.gd")
-		if sync == null:
+	# NOTE: never name a local `sync` — it's a reserved GDScript RPC keyword and the whole script
+	# fails to compile (which silently kills the mod).
+	var sync_node: Node = root.get_node_or_null("CommentBlockSync")
+	if sync_node == null:
+		sync_node = _new_script(SCRIPTS + "/comment_block_sync.gd")
+		if sync_node == null:
 			return false
-		sync.name = "CommentBlockSync"
-		root.add_child(sync)
+		sync_node.name = "CommentBlockSync"
+		root.add_child(sync_node)
 
 	# 2) The editor popup, on its own CanvasLayer so it floats above the board.
 	var window: Node = null
@@ -104,7 +112,7 @@ func _build_core() -> bool:
 			layer.add_child(window)
 		main.add_child(layer)
 		if window != null and window.has_method("setup"):
-			window.setup(sync)
+			window.setup(sync_node)
 	else:
 		window = main.get_node_or_null("CommentBlockUI/CommentEditWindow")
 
@@ -116,7 +124,7 @@ func _build_core() -> bool:
 			return false
 		overlay.name = "CommentBlockOverlay"
 		if overlay.has_method("setup"):
-			overlay.setup(sync, editor, window)
+			overlay.setup(sync_node, editor, window)
 		world.add_child(overlay)
 	_overlay = overlay
 

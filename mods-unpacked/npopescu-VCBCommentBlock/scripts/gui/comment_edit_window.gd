@@ -20,8 +20,8 @@ var _text_edit: TextEdit
 var _suppress_broadcast := false
 
 
-func setup(sync: Node) -> void :
-	_sync = sync
+func setup(sync_node: Node) -> void :
+	_sync = sync_node
 	if _sync != null and not _sync.is_connected("text_changed", self, "_on_remote_text"):
 		var _e = _sync.connect("text_changed", self, "_on_remote_text")
 

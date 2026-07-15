@@ -26,12 +26,12 @@ func save_file(path: String, savemode: int) -> void :
 func _cb_stamp_modded(d) -> void :
 	if typeof(d) != TYPE_DICTIONARY:
 		return
-	var sync := _cb_sync()
+	var sync_node := _cb_sync()
 	var modded = d.get(_CB_MODDED_KEY)
 	if typeof(modded) != TYPE_DICTIONARY:
 		modded = {}
-	if sync != null and sync.has_method("is_empty") and not sync.is_empty():
-		modded[_CB_MOD_ID] = sync.export_state()
+	if sync_node != null and sync_node.has_method("is_empty") and not sync_node.is_empty():
+		modded[_CB_MOD_ID] = sync_node.export_state()
 	else:
 		var _e = modded.erase(_CB_MOD_ID)
 	if modded.empty():
@@ -46,8 +46,8 @@ func open_file(path: String) -> void :
 
 
 func _cb_restore() -> void :
-	var sync := _cb_sync()
-	if sync == null or not sync.has_method("import_state"):
+	var sync_node := _cb_sync()
+	if sync_node == null or not sync_node.has_method("import_state"):
 		return
 	var data = null
 	if typeof(project) == TYPE_DICTIONARY:
@@ -55,10 +55,10 @@ func _cb_restore() -> void :
 		if typeof(modded) == TYPE_DICTIONARY:
 			data = modded.get(_CB_MOD_ID)
 	# import_state clears first, so a project with no entry correctly loads as "no comments".
-	sync.import_state(data)
+	sync_node.import_state(data)
 	# In a live multiplayer session, share the freshly loaded comments with the peer.
-	if sync.has_method("broadcast_full_state"):
-		sync.broadcast_full_state()
+	if sync_node.has_method("broadcast_full_state"):
+		sync_node.broadcast_full_state()
 
 
 func _cb_sync() -> Node:

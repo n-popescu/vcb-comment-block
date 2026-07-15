@@ -48,8 +48,8 @@ var _tip_shown := false
 
 
 # Called by mod_main before this node is added to the tree, so refs exist when _ready runs.
-func setup(sync: Node, editor: Node, window: Node) -> void :
-	_sync = sync
+func setup(sync_node: Node, editor: Node, window: Node) -> void :
+	_sync = sync_node
 	_editor = editor
 	_window = window
 
