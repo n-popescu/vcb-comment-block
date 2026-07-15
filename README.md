@@ -27,14 +27,18 @@ mods.
 
 ## How to use
 
-1. Click **Comment** in the toolbar to enter comment mode (the normal drawing tools pause while
-   it's on).
+Select the comment block, then work on the board:
+
+1. **Pick "comment"** any of three ways — the **Comment** toolbar button, the comment entry in the
+   **ink palette** (right bar, at the bottom of the ink grid), or the **Q/A quick menu** (hold the
+   ink-switch key and hover the comment entry). Selecting it pauses the normal drawing tools.
 2. **Left-click an empty spot** to place a block. Place more next to it to grow the comment area.
 3. **Left-click a block** to open the editor; type your comment and press **Enter**.
-4. **Hover** any block (in comment mode or not, even while simulating) to read its comment.
+4. **Hover** any block (whether or not comment mode is on, even while simulating) to read it.
 5. **Right-click a block** to delete it (or use **Delete comment** in the popup to remove the
    whole group).
-6. Click **Comment** again (or pick any other tool) to leave comment mode.
+6. Pick any ink/tool again (palette, quick menu, or toolbar) to leave comment mode and go back to
+   drawing.
 
 ## Default look
 

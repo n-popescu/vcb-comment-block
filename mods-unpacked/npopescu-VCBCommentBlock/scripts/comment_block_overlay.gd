@@ -22,7 +22,7 @@ const BLOCK_GLYPH := Color(0.15, 0.12, 0.07, 0.9)
 var _sync: Node = null
 var _editor: Node = null
 var _window: Node = null
-var _button = null
+var _buttons := []   # every "select comment" toggle (toolbar + palette + quick-menu), kept in sync
 
 var _cell := 8
 var _comment_mode := false
@@ -44,8 +44,14 @@ func setup(sync: Node, editor: Node, window: Node) -> void :
 	_window = window
 
 
-func set_button(button) -> void :
-	_button = button
+# Register a "select comment" toggle button (the toolbar button, the palette ink entry, the
+# quick-menu entry). Its `toggled` drives comment mode; all registered buttons are kept in sync.
+func register_button(button) -> void :
+	if button == null or button in _buttons:
+		return
+	_buttons.append(button)
+	if not button.is_connected("toggled", self, "_on_comment_button_toggled"):
+		var _e = button.connect("toggled", self, "_on_comment_button_toggled")
 
 
 func _ready() -> void :
@@ -56,6 +62,7 @@ func _ready() -> void :
 	E.follow_events(self, [
 		E.mi_mouse_input_on_board,
 		E.ui_context_change,
+		E.ed_indexed_color_change,
 	])
 	L_connect(E, "ed_tool_change_emitted", "_on_tool_change")
 	L_connect(E, "mi_mode_change_requested", "_on_mi_mode_change")
@@ -172,6 +179,7 @@ func _on_tip_tween_done() -> void :
 
 
 # --- comment mode -----------------------------------------------------------------------------
+# A "select comment" button was toggled by the user (clicked, or hover-selected in the quick menu).
 func _on_comment_button_toggled(pressed: bool) -> void :
 	if pressed:
 		enter_comment_mode()
@@ -183,14 +191,15 @@ func enter_comment_mode() -> void :
 	if _comment_mode:
 		return
 	if _editor != null and not bool(_editor.get("is_in_editor")):
-		# Can't place comments while simulating; bounce the button back off.
-		_set_button_pressed(false)
+		# Can't place comments while simulating; bounce the buttons back off.
+		_sync_buttons()
 		return
 	if _editor != null:
 		_prev_tool = int(_editor.get("editor_tool"))
 	_comment_mode = true
 	# Suppress the normal drawing tools while placing/editing comments.
 	E.emit_signal("ed_tool_change_emitted", true, Editor.TOOL.NONE)
+	_sync_buttons()
 
 
 func exit_comment_mode(restore_tool: bool) -> void :
@@ -202,6 +211,15 @@ func exit_comment_mode(restore_tool: bool) -> void :
 		if t < 0 or t == Editor.TOOL.NONE or t == Editor.TOOL.SIMULATOR:
 			t = Editor.TOOL.ARRAY
 		E.emit_signal("ed_tool_change_emitted", true, t)
+	_sync_buttons()
+
+
+# Picking an ink (palette or quick menu) leaves comment mode — the user chose to draw. (Also
+# covered by the palette/quick-menu comment buttons sharing the ink group, but this backs up the
+# toolbar button and any peer that isn't grouped.)
+func _ev_ed_indexed_color_change(_mode: int, _args: Dictionary) -> void :
+	if _comment_mode:
+		exit_comment_mode(true)
 
 
 # Any real tool becoming active (toolbar pick, or entering simulation) leaves comment mode.
@@ -210,23 +228,26 @@ func _on_tool_change(is_request: bool, new_tool: int) -> void :
 		return
 	if _comment_mode and new_tool != Editor.TOOL.NONE:
 		_comment_mode = false
-		_set_button_pressed(false)
+		_sync_buttons()
 
 
 func _on_mi_mode_change(is_simulation_requested: bool) -> void :
-	if _button != null:
-		_button.disabled = is_simulation_requested
+	for b in _buttons:
+		if is_instance_valid(b):
+			b.disabled = is_simulation_requested
 	if is_simulation_requested and _comment_mode:
 		_comment_mode = false
-		_set_button_pressed(false)
+		_sync_buttons()
 
 
-func _set_button_pressed(value: bool) -> void :
-	if _button == null:
-		return
-	_button.set_block_signals(true)
-	_button.pressed = value
-	_button.set_block_signals(false)
+# Reflect comment_mode on every registered button, without re-triggering their `toggled` signals.
+func _sync_buttons() -> void :
+	for b in _buttons:
+		if not is_instance_valid(b):
+			continue
+		b.set_block_signals(true)
+		b.pressed = _comment_mode
+		b.set_block_signals(false)
 
 
 # --- board input (place / edit / delete) ------------------------------------------------------

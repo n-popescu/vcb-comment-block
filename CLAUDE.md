@@ -28,6 +28,7 @@ stored in the mod's own data and persisted in the `.vcb`'s `modded` field.
 mod_main.gd                     waits for Main, then builds the nodes below + installs the extension
 scripts/comment_block_sync.gd   /root/CommentBlockSync : the data model + adjacency + MP RPCs + save API
 scripts/comment_block_overlay.gd  Main/World/CommentBlockOverlay : draws blocks, hover tooltip, click routing, comment mode
+scripts/comment_ink_button.gd   the palette + quick-menu "comment" entry (a toggle TextureButton)
 scripts/gui/comment_edit_window.gd  Main/CommentBlockUI/CommentEditWindow : the editor popup (note-zone TextEdit)
 extensions/file_system.gd       persists blocks in the .vcb "modded" field (script extension)
 ```
@@ -53,12 +54,19 @@ extensions/file_system.gd       persists blocks in the .vcb "modded" field (scri
   `get_viewport().get_mouse_position() + (18,20)` each frame, faded with a `Tween` on `modulate`
   (0.12 s `TRANS_SINE`) — the same fade idiom the stock UI uses (`notes.gd`,
   `flux_btn_checkbox.gd`). Works in edit AND sim.
-- **Comment mode**: the toolbar toggle calls `enter/exit_comment_mode`. Entering **requests editor
-  tool `NONE`** (`E.emit_signal("ed_tool_change_emitted", true, Editor.TOOL.NONE)`) so the normal
-  tools don't draw; the editor's own `_ev_mi_mouse_input_on_board` has no branch for `NONE`, so
-  clicks don't paint. Picking any real tool, or entering simulation, fires
-  `ed_tool_change_emitted(false, tool!=NONE)` → auto-exit (button un-pressed via
-  `set_block_signals`). The button is disabled during simulation.
+- **Comment mode + selection**: comment mode is entered by selecting the comment "ink" from any of
+  three entry points, all registered with the overlay via `register_button` and kept in sync by
+  `_sync_buttons` (block-signalled): (1) a **Comment** toolbar toggle in `FileControls`; (2) a
+  **palette** entry — a `comment_ink_button` added as a new row in the ink bar
+  (`Inks/VBoxContainer`), joined to the inks' `ButtonGroup` (read off an existing ink button) so it
+  selects/deselects like an ink; (3) a **quick-menu** entry — a `comment_ink_button` added to
+  `Interface/GUI/InkSwitchMenu`'s `HFlowContainer`, joined to that menu's runtime `ButtonGroup` and
+  appended to its `buttons` list so it's hover-selectable (it provides the `public_unhover` /
+  `public_enable_ink_switch_usage` methods the menu calls). Entering **requests editor tool `NONE`**
+  (`ed_tool_change_emitted`) so the normal tools don't draw; the editor's `_ev_mi_mouse_input_on_board`
+  has no branch for `NONE`. Leaving happens when a real tool is picked (`ed_tool_change_emitted`
+  false, tool != NONE), when an **ink** is picked (`_ev_ed_indexed_color_change`), on simulation
+  start, or by toggling a comment button off; the previous tool is restored.
 - **Board clicks** (via `E.mi_mouse_input_on_board`, only in comment mode + edit mode + inside
   `C.CIRCUIT.RECT`, on `just_pressed`): left on empty cell → `place`; left on a block → open the
   popup; right on a block → `remove`.
@@ -93,7 +101,18 @@ extensions/file_system.gd       persists blocks in the .vcb "modded" field (scri
 - **`Editor.TOOL.NONE` as the comment-mode tool**: chosen because the editor's mouse handler has no
   branch for it (so nothing paints). Verify no other path treats `NONE` specially.
 - **Default look is a colour + glyph**, not a texture. When a real texture exists, use it for the
-  toolbar `btn.icon` and swap the `_draw` rect for a `draw_texture_rect`; tune `CELL_SIZE`.
+  toolbar `btn.icon`, the `comment_ink_button` textures (`_make_texture`), and swap the overlay
+  `_draw` rect for a `draw_texture_rect`; tune `CELL_SIZE`.
+- **Palette/quick-menu integration is UNVERIFIED and the most fragile part.** Assumptions to check:
+  the ink bar is at `Inks/VBoxContainer` and its ink buttons share one `ButtonGroup`; the quick
+  menu is at `Interface/GUI/InkSwitchMenu` with buttons under `PanelContainer/HBoxContainer/
+  HFlowContainer` and a public `buttons` array + runtime `ButtonGroup`; appending to `qm.buttons`
+  after its `_ready` makes the entry hover-selectable. **Known cosmetic quirk:** because the comment
+  entry shares the inks' `ButtonGroup`, leaving comment mode *without* picking an ink (e.g. clicking
+  the comment button off, or picking a tool) can leave the ink grid with **no ink visually
+  selected** — the last ink is still the active `indexed_color_id`, so drawing still works; it's
+  only the highlight that's missing until you click an ink. (Fix idea for later: remember the ink on
+  enter and re-`ed_indexed_color_pick` it on non-ink exits.)
 - **MP**: both peers need this mod. Text streaming + place/remove + late-join sync are implemented;
   a same-instant place-and-type race on the exact same new group is not specially resolved (last
   writer wins, self-healing on the next edit / re-open).
