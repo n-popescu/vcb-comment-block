@@ -27,11 +27,18 @@ stored in the mod's own data and persisted in the `.vcb`'s `modded` field.
 ```
 mod_main.gd                     waits for Main, then builds the nodes below + installs the extension
 scripts/comment_block_sync.gd   /root/CommentBlockSync : the data model + adjacency + MP RPCs + save API
-scripts/comment_block_overlay.gd  Main/World/CommentBlockOverlay : draws blocks, hover tooltip, click routing, comment mode
-scripts/comment_ink_button.gd   the palette + quick-menu "comment" entry (a toggle TextureButton)
+scripts/comment_block_overlay.gd  Main/World/CommentBlockOverlay : draws blocks, hover tooltip, board draw/erase routing
+scripts/comment_ink_button.gd   the palette + quick-menu "comment" ink entry (a toggle TextureButton styled like an ink)
 scripts/gui/comment_edit_window.gd  Main/CommentBlockUI/CommentEditWindow : the editor popup (note-zone TextEdit)
 extensions/file_system.gd       persists blocks in the .vcb "modded" field (script extension)
 ```
+
+The comment block is a **real ink**, not a separate "mode": `mod_main` inserts the comment button
+into the palette's **Annotation** row (`Inks/VBoxContainer/HBoxContainer6`, between `BtnFiller` and
+`BtnNone`) and into the Q/A quick menu (`InkSwitchMenu/PanelContainer/HBoxContainer/HFlowContainer2`,
+between `BtnFiller` and `BtnNone`), joined to each bar's ink `ButtonGroup`. Wiring is retried across
+frames (the docked circuit editor + the quick menu's `buttons` list build a little after `Main`
+appears). There is **no toolbar toggle button** anymore.
 
 ### 2.1 Data model + grouping (`comment_block_sync.gd`)
 - Blocks snap to a grid of `CELL_SIZE` (8) board pixels. `_cells = {"cx,cy": true}`.
@@ -54,22 +61,22 @@ extensions/file_system.gd       persists blocks in the .vcb "modded" field (scri
   `get_viewport().get_mouse_position() + (18,20)` each frame, faded with a `Tween` on `modulate`
   (0.12 s `TRANS_SINE`) — the same fade idiom the stock UI uses (`notes.gd`,
   `flux_btn_checkbox.gd`). Works in edit AND sim.
-- **Comment mode + selection**: comment mode is entered by selecting the comment "ink" from any of
-  three entry points, all registered with the overlay via `register_button` and kept in sync by
-  `_sync_buttons` (block-signalled): (1) a **Comment** toolbar toggle in `FileControls`; (2) a
-  **palette** entry — a `comment_ink_button` added as a new row in the ink bar
-  (`Inks/VBoxContainer`), joined to the inks' `ButtonGroup` (read off an existing ink button) so it
-  selects/deselects like an ink; (3) a **quick-menu** entry — a `comment_ink_button` added to
-  `Interface/GUI/InkSwitchMenu`'s `HFlowContainer`, joined to that menu's runtime `ButtonGroup` and
-  appended to its `buttons` list so it's hover-selectable (it provides the `public_unhover` /
-  `public_enable_ink_switch_usage` methods the menu calls). Entering **requests editor tool `NONE`**
-  (`ed_tool_change_emitted`) so the normal tools don't draw; the editor's `_ev_mi_mouse_input_on_board`
-  has no branch for `NONE`. Leaving happens when a real tool is picked (`ed_tool_change_emitted`
-  false, tool != NONE), when an **ink** is picked (`_ev_ed_indexed_color_change`), on simulation
-  start, or by toggling a comment button off; the previous tool is restored.
-- **Board clicks** (via `E.mi_mouse_input_on_board`, only in comment mode + edit mode + inside
-  `C.CIRCUIT.RECT`, on `just_pressed`): left on empty cell → `place`; left on a block → open the
-  popup; right on a block → `remove`.
+- **Selecting the comment ink** (drawing comments): the comment ink is a real member of each bar's
+  ink `ButtonGroup`, so selecting it deselects the current ink (and vice-versa). Both comment
+  buttons register with the overlay via `register_button` and are kept selected-in-sync by
+  `_sync_buttons` (block-signalled; setting the palette button pressed also unpresses the ink via
+  its group). On `_enter` the overlay remembers the previous tool + ink and **holds the editor tool
+  at `NONE`** (`ed_tool_change_emitted`) so the normal tools don't paint while we place comment
+  blocks (the editor's `_ev_mi_mouse_input_on_board` has no branch for `NONE`). `_leave(restore_tool,
+  repick_ink)` covers every exit: picking another **ink** (`toggled(false)` on the group, or the
+  `ed_indexed_color_change` backup) restores the previous tool (the new ink is already active);
+  picking a real **tool** keeps that tool but re-picks the previous ink so the grid isn't left with
+  nothing highlighted; **simulation** start re-picks the ink and disables the buttons.
+- **Board draw/erase** (via `E.mi_mouse_input_on_board`, only while the comment ink is active + edit
+  mode + inside `C.CIRCUIT.RECT`): it draws like a trace — **left** click/drag `place`s blocks
+  (drag tracked with `_drag_place`); a plain left click on an **existing** block opens the popup
+  instead of starting a drag; **right** click/drag `remove`s blocks (`_drag_erase`). Drag flags
+  reset on release / leave.
 
 ### 2.3 Editor popup (`comment_edit_window.gd`, a themed `WindowDialog`)
 - Same window kind/theme as the Multiplayer / Board Size dialogs. Holds a multi-line `TextEdit`
@@ -98,21 +105,22 @@ extensions/file_system.gd       persists blocks in the .vcb "modded" field (scri
 
 - **Overlay z-order**: assumed World `Node2D` children render above the board (as the brush cursor
   does). If comment blocks render *behind* the board, adjust the overlay's `z_index`/parent.
-- **`Editor.TOOL.NONE` as the comment-mode tool**: chosen because the editor's mouse handler has no
-  branch for it (so nothing paints). Verify no other path treats `NONE` specially.
-- **Default look is a colour + glyph**, not a texture. When a real texture exists, use it for the
-  toolbar `btn.icon`, the `comment_ink_button` textures (`_make_texture`), and swap the overlay
-  `_draw` rect for a `draw_texture_rect`; tune `CELL_SIZE`.
-- **Palette/quick-menu integration is UNVERIFIED and the most fragile part.** Assumptions to check:
-  the ink bar is at `Inks/VBoxContainer` and its ink buttons share one `ButtonGroup`; the quick
-  menu is at `Interface/GUI/InkSwitchMenu` with buttons under `PanelContainer/HBoxContainer/
-  HFlowContainer` and a public `buttons` array + runtime `ButtonGroup`; appending to `qm.buttons`
-  after its `_ready` makes the entry hover-selectable. **Known cosmetic quirk:** because the comment
-  entry shares the inks' `ButtonGroup`, leaving comment mode *without* picking an ink (e.g. clicking
-  the comment button off, or picking a tool) can leave the ink grid with **no ink visually
-  selected** — the last ink is still the active `indexed_color_id`, so drawing still works; it's
-  only the highlight that's missing until you click an ink. (Fix idea for later: remember the ink on
-  enter and re-`ed_indexed_color_pick` it on non-ink exits.)
+- **`Editor.TOOL.NONE` while the comment ink is active**: chosen because the editor's mouse handler
+  has no branch for it (so nothing paints) — this is what lets the mod place blocks without the
+  normal tools drawing. Verify no other path treats `NONE` specially. (We can't cleanly extend
+  `editor.gd` here: the Multiplayer mod reproduces `_ev_mi_mouse_input_on_board` verbatim, so
+  chaining a second override is fragile — hence the `TOOL.NONE` approach instead.)
+- **Default look is a colour + glyph**, not a texture. The palette/quick-menu button uses the
+  game's white `text_symbol.png` glyph tinted by a `FluxModTextureButton` accent (`COMMENT_COLOR`),
+  matching native ink buttons. When a real texture exists, set it as `comment_ink_button`'s
+  `texture_normal` and swap the overlay `_draw` rect for a `draw_texture_rect`; tune `CELL_SIZE`.
+- **Palette/quick-menu placement**: the comment ink is inserted into the palette's `HBoxContainer6`
+  ("Annotation" row) between `BtnFiller`/`BtnNone`, and into the quick menu's `HFlowContainer2`
+  between `BtnFiller`/`BtnNone`, joined to each bar's `ButtonGroup` (read off `BtnNone` / the menu's
+  `buttons[0]`). Wiring retries across frames until both bars exist (docking builds the circuit
+  editor, and the menu fills `buttons` in its `_ready`, a little after `Main` appears). The old
+  "no ink highlighted after leaving comment" quirk is handled: `_leave(..., repick_ink=true)`
+  re-`ed_indexed_color_pick`s the previous ink on non-ink exits.
 - **MP**: both peers need this mod. Text streaming + place/remove + late-join sync are implemented;
   a same-instant place-and-type race on the exact same new group is not specially resolved (last
   writer wins, self-healing on the next edit / re-open).
@@ -135,10 +143,13 @@ extensions/file_system.gd       persists blocks in the .vcb "modded" field (scri
   fails with HTTP 403. Example: `claude/<topic>-<sessionid>`.
 - Commits are auto-signed (ssh). Don't disable signing/hooks.
 - Open PRs against `main`; squash-merge. **One PR per change** (no duplicate branches).
-- Test recipe (in-engine): enable modding + drop the zip, launch. Click **Comment**; place a few
-  blocks; click one → type → Enter; hover to read (tooltip follows the mouse + fades). Place blocks
-  adjacent → confirm they share one comment; right-click to delete. Save the `.vcb`, reopen →
-  comments persist; a comment-free board saves clean. Start a simulation → hover still shows text,
-  editing is disabled. With the Multiplayer mod: on host + joiner, place/type on one → the other
-  sees blocks appear and text stream in; a late joiner receives existing comments.
+- Test recipe (in-engine): enable modding + drop the zip, launch. Confirm the **comment** ink
+  appears in the palette's Annotation row (between Filler and None) AND in the Q/A quick menu
+  (between Filler and None). Select it; **left-drag** to paint a few blocks; **left-click** an
+  existing block → type → Enter; hover to read (tooltip follows the mouse + fades). Place blocks
+  adjacent → confirm they share one comment; **right-click / right-drag** to erase. Pick another
+  ink → comment deselects and normal drawing resumes (an ink stays highlighted). Save the `.vcb`,
+  reopen → comments persist; a comment-free board saves clean. Start a simulation → hover still
+  shows text, drawing is disabled. With the Multiplayer mod: on host + joiner, draw/type on one →
+  the other sees blocks appear and text stream in; a late joiner receives existing comments.
 ```

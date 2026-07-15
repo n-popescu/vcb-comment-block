@@ -4,13 +4,16 @@ A runtime [Godot Mod Loader](https://github.com/GodotModding/godot-mod-loader) m
 [Virtual Circuit Board](https://store.steampowered.com/app/1885690/Virtual_Circuit_Board/) that
 adds an **editor-only comment block** — a block you place on the board to annotate your circuit.
 
-- **Place it anywhere.** It's purely an editor decoration — it is **never sent to the simulation
-  engine**, so it doesn't affect the circuit at all.
+- **It's just another ink.** The comment block sits in the palette's **Annotation** row (between
+  Filler and None) and in the **Q/A quick menu** (between Filler and None). Pick it like any ink
+  and **draw** comment blocks with the mouse — left-click or drag to place, right-click or drag to
+  erase. It's purely an editor decoration — **never sent to the simulation engine**, so it doesn't
+  affect the circuit at all.
 - **Hover to read.** Hovering a block shows its comment as a small tooltip that **follows the
   mouse** (to the lower-right) with a soft fade in/out.
-- **Click to edit.** With comment mode on, clicking a block opens a popup (the game's dialog
-  style) with a text zone. **Enter** saves it (**Shift+Enter** for a new line); click the block
-  again anytime to change it.
+- **Click to edit.** With the comment ink selected, clicking an existing block opens a popup (the
+  game's dialog style) with a text zone. **Enter** saves it (**Shift+Enter** for a new line);
+  click the block again anytime to change it.
 - **Adjacent blocks are one comment.** Blocks placed next to each other merge into a single
   bigger comment — hovering or clicking any of them shows/edits the same text, with no seam.
 - **Multiplayer-ready.** With the [VCB Multiplayer](https://github.com/n-popescu/vcb-multiplayer)
@@ -27,26 +30,27 @@ mods.
 
 ## How to use
 
-Select the comment block, then work on the board:
+Pick the comment block like any ink, then draw on the board:
 
-1. **Pick "comment"** any of three ways — the **Comment** toolbar button, the comment entry in the
-   **ink palette** (right bar, at the bottom of the ink grid), or the **Q/A quick menu** (hold the
-   ink-switch key and hover the comment entry). Selecting it pauses the normal drawing tools.
-2. **Left-click an empty spot** to place a block. Place more next to it to grow the comment area.
-3. **Left-click a block** to open the editor; type your comment and press **Enter**.
-4. **Hover** any block (whether or not comment mode is on, even while simulating) to read it.
-5. **Right-click a block** to delete it (or use **Delete comment** in the popup to remove the
+1. **Select "comment"** from the **ink palette** (right bar → **Annotation** row, between Filler
+   and None) or the **Q/A quick menu** (hold the ink-switch key and hover the comment entry,
+   between Filler and None). Selecting it deselects the current ink — just like switching inks.
+2. **Left-click or drag** on the board to place blocks (drag to paint a whole comment area). Place
+   more next to a block to grow the comment.
+3. **Left-click an existing block** to open the editor; type your comment and press **Enter**.
+4. **Right-click or drag** to erase blocks (or use **Delete comment** in the popup to remove the
    whole group).
-6. Pick any ink/tool again (palette, quick menu, or toolbar) to leave comment mode and go back to
-   drawing.
+5. **Hover** any block (whatever ink is selected, even while simulating) to read it.
+6. Pick any other **ink or tool** to go back to normal drawing.
 
 ## Default look
 
 Until a custom texture is added, blocks are drawn as a **warm translucent square with a small
-quote glyph** on the group's anchor, and the toolbar entry is a text **Comment** button. The
-block colour is the `BLOCK_FILL`/`BLOCK_EDGE` constants in
-`scripts/comment_block_overlay.gd`, and the on-board block size is `CELL_SIZE` in
-`scripts/comment_block_sync.gd` — both easy to swap for a real texture later.
+quote glyph** on the group's anchor, and the palette/quick-menu entry uses the game's text glyph
+tinted the comment colour. The block colour is the `BLOCK_FILL`/`BLOCK_EDGE` constants in
+`scripts/comment_block_overlay.gd` (and `COMMENT_COLOR` in `scripts/comment_ink_button.gd`), and
+the on-board block size is `CELL_SIZE` in `scripts/comment_block_sync.gd` — all easy to swap for a
+real texture later.
 
 ## Install & run
 
