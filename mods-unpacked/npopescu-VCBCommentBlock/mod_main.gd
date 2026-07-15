@@ -214,6 +214,10 @@ func _wire_palette() -> bool:
 	if none_btn != null:
 		row.move_child(btn, none_btn.get_index())  # place it just before None
 	_overlay.register_button(btn)
+	# The palette button's right-click menu picks the comment tile size (4x4 / 8x8); it drives the
+	# overlay's shared placement brush size.
+	if btn.has_method("set_size_menu_target"):
+		btn.set_size_menu_target(_overlay)
 	return true
 
 

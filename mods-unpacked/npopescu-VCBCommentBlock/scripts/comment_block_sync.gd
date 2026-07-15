@@ -25,7 +25,7 @@ extends Node
 # joiner. All MP calls are guarded by _live_session() via get_node_or_null/Object.get, so the mod
 # works fine with the Multiplayer mod absent.
 
-const CELL_SIZE := 8
+const CELL_SIZE := 4
 
 var _cells := {}
 var _texts := {}
@@ -258,13 +258,19 @@ func _compute_groups() -> Array:
 	return groups
 
 
+# Every comment group (connected component), as an Array of Arrays of Vector2. Used by the overlay
+# to draw one "T" marker centered on each group.
+func get_groups() -> Array:
+	return _compute_groups()
+
+
 # --- save / load (used by the file_system.gd extension) ---------------------------------------
 func export_state() -> Dictionary:
 	var cells := []
 	for k in _cells.keys():
 		var c := _cell_from_key(k)
 		cells.append([int(c.x), int(c.y)])
-	return {"cells": cells, "texts": _texts.duplicate()}
+	return {"v": 2, "cell": CELL_SIZE, "cells": cells, "texts": _texts.duplicate()}
 
 
 func import_state(data) -> void :
@@ -272,15 +278,28 @@ func import_state(data) -> void :
 	_cells.clear()
 	_texts.clear()
 	if typeof(data) == TYPE_DICTIONARY:
+		# Files saved before the grid was halved (v1, no "v" key) stored cells on the old 8px grid.
+		# Scale them onto the 4px grid: each old cell becomes a 2x2 block and each text key moves to
+		# that block's top-left (its new anchor). New files (v2) load as-is.
+		var version: int = int(data.get("v", 1))
+		var scale: int = 2 if version < 2 else 1
 		var cells = data.get("cells", [])
 		if typeof(cells) == TYPE_ARRAY:
 			for pair in cells:
 				if typeof(pair) == TYPE_ARRAY and pair.size() == 2:
-					_cells[_key(Vector2(int(pair[0]), int(pair[1])))] = true
+					var bx: int = int(pair[0]) * scale
+					var by: int = int(pair[1]) * scale
+					for dx in range(scale):
+						for dy in range(scale):
+							_cells[_key(Vector2(bx + dx, by + dy))] = true
 		var texts = data.get("texts", {})
 		if typeof(texts) == TYPE_DICTIONARY:
 			for tk in texts.keys():
-				_texts[String(tk)] = String(texts[tk])
+				var nk: String = String(tk)
+				if scale != 1:
+					var oc: Vector2 = _cell_from_key(String(tk))
+					nk = _key(Vector2(int(oc.x) * scale, int(oc.y) * scale))
+				_texts[nk] = String(texts[tk])
 	_applying_remote = false
 	emit_signal("blocks_changed")
 

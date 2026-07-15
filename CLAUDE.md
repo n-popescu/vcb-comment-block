@@ -56,7 +56,13 @@ at runtime is the only mechanism available; it's the same technique the Board Si
 mods use to add their own controls to the circuit-editor panel.
 
 ### 2.1 Data model + grouping (`comment_block_sync.gd`)
-- Blocks snap to a grid of `CELL_SIZE` (8) board pixels. `_cells = {"cx,cy": true}`.
+- Blocks snap to a grid of `CELL_SIZE` (4) board pixels. `_cells = {"cx,cy": true}`. The comment
+  ink places a square **footprint** of the chosen tile size — 4×4 (one cell) or 8×8 (a 2×2 stamp),
+  picked from the palette button's right-click menu (`comment_ink_button._build_size_menu` →
+  `overlay.set_brush_size`). The overlay draws a hover **placement preview** (footprint outline)
+  wherever the next block would land while the comment ink is active. `export_state` stamps
+  `{"v":2,"cell":4,…}`; `import_state` up-converts legacy v1 (8px) files (each old cell → a 2×2
+  block, text keys remapped to the new anchor).
 - **Adjacent blocks (4-neighbour) form one group** = a connected component (`group_cells`, flood
   fill). Each group's text lives at its **anchor** = top-most then left-most cell
   (`anchor_of`/`_min_cell`). `_texts = {"<anchor cx,cy>": text}` — one entry per non-empty group.

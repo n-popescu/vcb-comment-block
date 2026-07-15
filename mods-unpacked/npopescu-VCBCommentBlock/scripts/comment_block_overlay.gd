@@ -68,6 +68,13 @@ var _hover_cells := {}
 var _drag_place := false
 var _drag_erase := false
 
+# Brush size in board pixels for the next placement — 8x8 (default) or 4x4, chosen from the comment
+# ink button's right-click menu. Placement stamps a square footprint of this size at the cursor.
+var _brush_px := 8
+# Placement preview: the top-left cell of where the next block would land while the comment ink is
+# active (or (-1,-1) when there's nothing to preview).
+var _preview_origin := Vector2(-1, -1)
+
 # Tooltip (screen-space, on its own CanvasLayer so it ignores the board camera transform).
 var _tip_layer: CanvasLayer
 var _tip_panel: PanelContainer
@@ -91,6 +98,37 @@ func register_button(button) -> void :
 	if button == null or button in _buttons:
 		return
 	_buttons.append(button)
+
+
+# Set the placement brush size (board pixels: 4 or 8), from the comment ink button's right-click
+# size menu. Both comment buttons drive this single shared value.
+func set_brush_size(px: int) -> void :
+	if px != 4 and px != 8:
+		return
+	_brush_px = px
+	update()
+
+
+func get_brush_size() -> int:
+	return _brush_px
+
+
+# How many grid cells a side of the current brush spans (8px brush = 2 cells on the 4px grid).
+func _footprint_side() -> int:
+	var n: int = _brush_px / _cell
+	if n < 1:
+		n = 1
+	return n
+
+
+# The cells a brush of the current size covers when anchored (top-left) at `origin`.
+func _footprint_cells(origin: Vector2) -> Array:
+	var n: int = _footprint_side()
+	var out := []
+	for dy in range(n):
+		for dx in range(n):
+			out.append(Vector2(origin.x + dx, origin.y + dy))
+	return out
 
 
 func _ready() -> void :
@@ -185,17 +223,43 @@ func _draw() -> void :
 			edge.a *= a
 			draw_rect(r, fill, true)
 			draw_rect(r, edge, false, 1.0)
-	# The "T" text marker at each zone's top-left (anchor) cell — always shown, so a comment reads
-	# as an annotation even with no orange overlay.
-	for cell in cells:
-		if _sync.anchor_of(cell) == cell:
-			var o := Vector2(cell.x * s, cell.y * s)
-			if _tex_t != null:
-				draw_texture_rect(_tex_t, Rect2(o.x, o.y, s, s), false, T_TINT)
-			else:
-				var d := s * 0.22
-				draw_rect(Rect2(o.x + s * 0.28, o.y + s * 0.3, d, d), BLOCK_GLYPH, true)
-				draw_rect(Rect2(o.x + s * 0.55, o.y + s * 0.3, d, d), BLOCK_GLYPH, true)
+	# Placement preview: a faint fill + outline of where the next block will land (only while the
+	# comment ink is active).
+	if _active and _preview_origin.x >= 0:
+		var pf := BLOCK_FILL
+		pf.a = 0.30
+		for pc in _footprint_cells(_preview_origin):
+			draw_rect(Rect2(pc.x * s, pc.y * s, s, s), pf, true)
+		var side := _footprint_side()
+		var outline := Rect2(_preview_origin.x * s, _preview_origin.y * s, side * s, side * s)
+		draw_rect(outline, BLOCK_EDGE, false, 1.5)
+	# The "T" text marker — one per group, centered on the group's bounding box and drawn small (a
+	# fraction of the block) so it reads as an annotation without covering the block.
+	for grp in _sync.get_groups():
+		if grp.empty():
+			continue
+		var minx: float = grp[0].x
+		var miny: float = grp[0].y
+		var maxx: float = grp[0].x
+		var maxy: float = grp[0].y
+		for c in grp:
+			minx = min(minx, c.x)
+			miny = min(miny, c.y)
+			maxx = max(maxx, c.x)
+			maxy = max(maxy, c.y)
+		var bx: float = minx * s
+		var by: float = miny * s
+		var bw: float = (maxx - minx + 1.0) * s
+		var bh: float = (maxy - miny + 1.0) * s
+		var tsz: float = min(bw, bh) * 0.6
+		var tx: float = bx + (bw - tsz) * 0.5
+		var ty: float = by + (bh - tsz) * 0.5
+		if _tex_t != null:
+			draw_texture_rect(_tex_t, Rect2(tx, ty, tsz, tsz), false, T_TINT)
+		else:
+			var d: float = tsz * 0.35
+			draw_rect(Rect2(tx + tsz * 0.1, ty + tsz * 0.15, d, d), BLOCK_GLYPH, true)
+			draw_rect(Rect2(tx + tsz * 0.5, ty + tsz * 0.15, d, d), BLOCK_GLYPH, true)
 
 
 # --- hover tooltip + zone-overlay fade --------------------------------------------------------
@@ -206,8 +270,9 @@ func _process(delta: float) -> void :
 	# comment-drawing mode, the hover zone highlight.
 	var hovered_cell = null
 	var text := ""
+	var board_pos := Vector2(-1, -1)
 	if _is_world_frame:
-		var board_pos := get_global_mouse_position()
+		board_pos = get_global_mouse_position()
 		if C.CIRCUIT.RECT.has_point(board_pos):
 			var cell: Vector2 = _sync.cell_of(board_pos)
 			if _sync.has_block(cell):
@@ -215,6 +280,13 @@ func _process(delta: float) -> void :
 				text = _sync.get_text(cell)
 				if text == "":
 					text = "(empty comment — click to add text)"
+	# Placement preview: while the comment ink is active, show where the next block would land.
+	var new_preview := Vector2(-1, -1)
+	if _active and _is_world_frame and C.CIRCUIT.RECT.has_point(board_pos):
+		new_preview = _sync.cell_of(board_pos)
+	if new_preview != _preview_origin:
+		_preview_origin = new_preview
+		update()
 	# Tooltip follows the mouse (offset lower-right so the pointer doesn't cover the text).
 	if hovered_cell != null:
 		_tip_label.text = text
@@ -403,17 +475,23 @@ func _ev_mi_mouse_input_on_board(_mode: int, _args: Dictionary) -> void :
 				_drag_place = false
 				_open_editor(cell)
 			else:
-				_sync.place(cell, true)
+				_place_footprint(cell)
 				_drag_place = true
 		elif p_is_pressed and _drag_place:
-			if not _sync.has_block(cell):
-				_sync.place(cell, true)
+			_place_footprint(cell)
 	else:
 		# Right button erases (click + drag), like erasing a trace.
 		if p_is_just_pressed:
 			_drag_erase = true
 		if _drag_erase and _sync.has_block(cell):
 			_sync.remove(cell, true)
+
+
+# Place every not-yet-present cell of the current brush footprint anchored at `origin`.
+func _place_footprint(origin: Vector2) -> void :
+	for c in _footprint_cells(origin):
+		if not _sync.has_block(c):
+			_sync.place(c, true)
 
 
 func _open_editor(cell: Vector2) -> void :
