@@ -29,6 +29,8 @@ const CELL_SIZE := 4
 
 var _cells := {}
 var _texts := {}
+# anchor key -> author peer id (who wrote the note). 0 = solo / unknown (default colour, no name).
+var _authors := {}
 
 var _applying_remote := false
 
@@ -74,6 +76,7 @@ func _ev_fs_project_change(_mode: int, _args: Dictionary) -> void :
 func reset() -> void :
 	_cells.clear()
 	_texts.clear()
+	_authors.clear()
 	emit_signal("blocks_changed")
 
 
@@ -163,14 +166,31 @@ func get_text(cell: Vector2) -> String:
 	return String(_texts.get(_key(anchor), ""))
 
 
+# The author (peer id) of the note on `cell`'s group, or 0 when solo / unknown.
+func get_author(cell: Vector2) -> int:
+	var anchor := anchor_of(cell)
+	if anchor.x < 0:
+		return 0
+	return int(_authors.get(_key(anchor), 0))
+
+
+# Our own author id: our multiplayer peer id in a session, else 0 (solo → default colour, no name).
+func _current_author() -> int:
+	var mp := get_tree().root.get_node_or_null("MP")
+	if mp != null and int(mp.get("my_id")) != 0:
+		return int(mp.get("my_id"))
+	return 0
+
+
 # --- mutations --------------------------------------------------------------------------------
 func place(cell: Vector2, broadcast: bool) -> void :
 	var k := _key(cell)
 	if _cells.has(k):
 		return
 	var old_cell_texts := _snapshot_cell_texts()
+	var old_cell_authors := _snapshot_cell_authors()
 	_cells[k] = true
-	_reconcile_texts(old_cell_texts)
+	_reconcile_texts(old_cell_texts, old_cell_authors)
 	emit_signal("blocks_changed")
 	if broadcast and not _applying_remote and _live_session():
 		rpc("_rpc_place", int(cell.x), int(cell.y))
@@ -181,8 +201,9 @@ func remove(cell: Vector2, broadcast: bool) -> void :
 	if not _cells.has(k):
 		return
 	var old_cell_texts := _snapshot_cell_texts()
+	var old_cell_authors := _snapshot_cell_authors()
 	var _e = _cells.erase(k)
-	_reconcile_texts(old_cell_texts)
+	_reconcile_texts(old_cell_texts, old_cell_authors)
 	emit_signal("blocks_changed")
 	if broadcast and not _applying_remote and _live_session():
 		rpc("_rpc_remove", int(cell.x), int(cell.y))
@@ -200,12 +221,15 @@ func set_text(cell: Vector2, text: String, broadcast: bool) -> void :
 	if anchor.x < 0:
 		return
 	var ak := _key(anchor)
+	var author := _current_author()
 	if text == "":
 		var _e = _texts.erase(ak)
+		var _e2 = _authors.erase(ak)
 	else:
 		_texts[ak] = text
+		_authors[ak] = author
 	if broadcast and not _applying_remote and _live_session():
-		rpc("_rpc_set_text", int(anchor.x), int(anchor.y), text)
+		rpc("_rpc_set_text", int(anchor.x), int(anchor.y), text, author)
 
 
 # Snapshot the CURRENT text of every occupied cell (each cell of a non-empty group maps to that
@@ -222,26 +246,47 @@ func _snapshot_cell_texts() -> Dictionary:
 	return out
 
 
+# Parallel to _snapshot_cell_texts: each cell of a non-empty group -> that group's author id.
+func _snapshot_cell_authors() -> Dictionary:
+	var out := {}
+	for g in _compute_groups():
+		var ak := _key(_min_cell(g))
+		var t := String(_texts.get(ak, ""))
+		if t != "":
+			var a: int = int(_authors.get(ak, 0))
+			for c in g:
+				out[_key(c)] = a
+	return out
+
+
 # Recompute every group's anchor and re-home its text there. Each group inherits the text carried
 # by any of its cells in `old_cell_texts` (the pre-mutation per-cell snapshot): so text follows the
 # group as it grows/shrinks/re-anchors, and survives deleting the old anchor cell. When groups merge
 # their distinct non-empty texts are joined by a newline; when a group splits, each surviving piece
 # keeps the text (the comment only disappears once every block of the group is gone).
-func _reconcile_texts(old_cell_texts: Dictionary) -> void :
+func _reconcile_texts(old_cell_texts: Dictionary, old_cell_authors: Dictionary = {}) -> void :
 	var groups := _compute_groups()
 	var new_texts := {}
+	var new_authors := {}
 	for g in groups:
 		var anchor := _min_cell(g)
 		var parts := []
+		var author: int = 0
 		for c in g:
 			var ck := _key(c)
 			if old_cell_texts.has(ck):
 				var t: String = String(old_cell_texts[ck])
 				if t != "" and not (t in parts):
 					parts.append(t)
+					# The merged note keeps the first contributing cell's author.
+					if author == 0 and old_cell_authors.has(ck):
+						author = int(old_cell_authors[ck])
 		if not parts.empty():
-			new_texts[_key(anchor)] = PoolStringArray(parts).join("\n")
+			var ak := _key(anchor)
+			new_texts[ak] = PoolStringArray(parts).join("\n")
+			new_authors[ak] = author
 	_texts = new_texts
+	_authors = new_authors
 
 
 func _compute_groups() -> Array:
@@ -270,13 +315,14 @@ func export_state() -> Dictionary:
 	for k in _cells.keys():
 		var c := _cell_from_key(k)
 		cells.append([int(c.x), int(c.y)])
-	return {"v": 2, "cell": CELL_SIZE, "cells": cells, "texts": _texts.duplicate()}
+	return {"v": 2, "cell": CELL_SIZE, "cells": cells, "texts": _texts.duplicate(), "authors": _authors.duplicate()}
 
 
 func import_state(data) -> void :
 	_applying_remote = true
 	_cells.clear()
 	_texts.clear()
+	_authors.clear()
 	if typeof(data) == TYPE_DICTIONARY:
 		# Files saved before the grid was halved (v1, no "v" key) stored cells on the old 8px grid.
 		# Scale them onto the 4px grid: each old cell becomes a 2x2 block and each text key moves to
@@ -300,6 +346,14 @@ func import_state(data) -> void :
 					var oc: Vector2 = _cell_from_key(String(tk))
 					nk = _key(Vector2(int(oc.x) * scale, int(oc.y) * scale))
 				_texts[nk] = String(texts[tk])
+		var authors = data.get("authors", {})
+		if typeof(authors) == TYPE_DICTIONARY:
+			for tk in authors.keys():
+				var nk: String = String(tk)
+				if scale != 1:
+					var oc: Vector2 = _cell_from_key(String(tk))
+					nk = _key(Vector2(int(oc.x) * scale, int(oc.y) * scale))
+				_authors[nk] = int(authors[tk])
 	_applying_remote = false
 	emit_signal("blocks_changed")
 
@@ -342,13 +396,15 @@ remote func _rpc_remove(cx: int, cy: int) -> void :
 	_applying_remote = false
 
 
-remote func _rpc_set_text(cx: int, cy: int, text) -> void :
+remote func _rpc_set_text(cx: int, cy: int, text, author = 0) -> void :
 	_applying_remote = true
 	var ak := _key(Vector2(cx, cy))
 	if String(text) == "":
 		var _e = _texts.erase(ak)
+		var _e2 = _authors.erase(ak)
 	else:
 		_texts[ak] = String(text)
+		_authors[ak] = int(author)
 	_applying_remote = false
 	emit_signal("text_changed", ak, String(text))
 

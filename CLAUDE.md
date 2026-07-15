@@ -75,6 +75,11 @@ mods use to add their own controls to the circuit-editor panel.
   surviving piece. `set_text` writes at the anchor. `remove_group` clears a whole group.
 - Emits `blocks_changed` (overlay redraws) and `text_changed(anchor_key, text)` (open popup on a
   peer updates live).
+- **Author attribution (MP):** each non-empty group records an author peer id (`_authors`, keyed
+  like `_texts`, carried through reconcile + the `_rpc_set_text`/save state). The overlay tints each
+  group's fill/edge/T and the hover tooltip's border by `MP.get_player_color(author)` and prefixes
+  the tooltip with `MP.get_player_name(author)` ("name: text"); solo (author 0 / MP absent) keeps
+  the default warm tan and no prefix.
 
 ### 2.2 Overlay (`comment_block_overlay.gd`, a `Node2D` under `Main/World`)
 - Sibling of `CursorBoard`, so it shares board-pixel space and pans/zooms with the camera (the

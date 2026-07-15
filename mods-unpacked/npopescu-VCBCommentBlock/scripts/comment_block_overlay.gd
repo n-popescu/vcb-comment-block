@@ -47,6 +47,7 @@ const COMMENT_ID := "COMMENT"
 var _sync: Node = null
 var _editor: Node = null
 var _window: Node = null
+var _mp: Node = null   # multiplayer autoload (optional) — for author name + colour
 var _buttons := []   # every comment-ink button (palette + quick-menu), kept selected-in-sync
 
 var _cell := 8
@@ -131,6 +132,26 @@ func _footprint_cells(origin: Vector2) -> Array:
 	return out
 
 
+# The multiplayer autoload, if present (may be absent — this mod works solo).
+func _get_mp() -> Node:
+	if _mp == null or not is_instance_valid(_mp):
+		_mp = get_tree().root.get_node_or_null("MP")
+	return _mp
+
+
+# A comment group's colour: its author's multiplayer hover colour, or the default warm tan when
+# solo / the author is unknown (matches BLOCK_FILL/BLOCK_EDGE/T_TINT).
+func _group_color(grp: Array) -> Color:
+	var author: int = 0
+	if _sync != null and _sync.has_method("get_author"):
+		author = int(_sync.get_author(grp[0]))
+	if author != 0:
+		var mp := _get_mp()
+		if mp != null and mp.has_method("get_player_color"):
+			return mp.get_player_color(author)
+	return Color(0.882, 0.745, 0.514)
+
+
 func _ready() -> void :
 	z_index = 20
 	_tex_t = _load_t_texture()
@@ -208,36 +229,23 @@ func _draw() -> void :
 	if _sync == null:
 		return
 	var s := float(_cell)
-	var cells = _sync.get_all_cells()
-	# Warm-orange zone overlay: every zone while the comment ink is active (_all_alpha), plus the
-	# hovered zone the rest of the time (_hover_alpha). Both fade, so cells only draw when visible.
-	for cell in cells:
-		var a := _all_alpha
-		if _hover_cells.has(_sync.key_for(cell)):
-			a = max(a, _hover_alpha)
-		if a > 0.003:
-			var r := Rect2(cell.x * s, cell.y * s, s, s)
-			var fill := BLOCK_FILL
-			fill.a *= a
-			var edge := BLOCK_EDGE
-			edge.a *= a
-			draw_rect(r, fill, true)
-			draw_rect(r, edge, false, 1.0)
-	# Placement preview: a faint fill + outline of where the next block will land (only while the
-	# comment ink is active).
-	if _active and _preview_origin.x >= 0:
-		var pf := BLOCK_FILL
-		pf.a = 0.30
-		for pc in _footprint_cells(_preview_origin):
-			draw_rect(Rect2(pc.x * s, pc.y * s, s, s), pf, true)
-		var side := _footprint_side()
-		var outline := Rect2(_preview_origin.x * s, _preview_origin.y * s, side * s, side * s)
-		draw_rect(outline, BLOCK_EDGE, false, 1.5)
-	# The "T" text marker — one per group, centered on the group's bounding box and drawn small (a
-	# fraction of the block) so it reads as an annotation without covering the block.
+	# Per group: fill/edge (faded, only where visible) + a small centered "T" marker, tinted by the
+	# note author's multiplayer colour (or the default warm tan when solo / the author is unknown).
 	for grp in _sync.get_groups():
 		if grp.empty():
 			continue
+		var col := _group_color(grp)
+		for c in grp:
+			var a := _all_alpha
+			if _hover_cells.has(_sync.key_for(c)):
+				a = max(a, _hover_alpha)
+			if a > 0.003:
+				var fill := col
+				fill.a = BLOCK_FILL.a * a
+				var edge := col
+				edge.a = BLOCK_EDGE.a * a
+				draw_rect(Rect2(c.x * s, c.y * s, s, s), fill, true)
+				draw_rect(Rect2(c.x * s, c.y * s, s, s), edge, false, 1.0)
 		var minx: float = grp[0].x
 		var miny: float = grp[0].y
 		var maxx: float = grp[0].x
@@ -247,19 +255,29 @@ func _draw() -> void :
 			miny = min(miny, c.y)
 			maxx = max(maxx, c.x)
 			maxy = max(maxy, c.y)
-		var bx: float = minx * s
-		var by: float = miny * s
 		var bw: float = (maxx - minx + 1.0) * s
 		var bh: float = (maxy - miny + 1.0) * s
 		var tsz: float = min(bw, bh) * 0.6
-		var tx: float = bx + (bw - tsz) * 0.5
-		var ty: float = by + (bh - tsz) * 0.5
+		var tx: float = minx * s + (bw - tsz) * 0.5
+		var ty: float = miny * s + (bh - tsz) * 0.5
+		var tcol := col
+		tcol.a = 1.0
 		if _tex_t != null:
-			draw_texture_rect(_tex_t, Rect2(tx, ty, tsz, tsz), false, T_TINT)
+			draw_texture_rect(_tex_t, Rect2(tx, ty, tsz, tsz), false, tcol)
 		else:
 			var d: float = tsz * 0.35
 			draw_rect(Rect2(tx + tsz * 0.1, ty + tsz * 0.15, d, d), BLOCK_GLYPH, true)
 			draw_rect(Rect2(tx + tsz * 0.5, ty + tsz * 0.15, d, d), BLOCK_GLYPH, true)
+	# Placement preview: a faint fill + outline of where the next block will land (only while the
+	# comment ink is active). Uses the default tan (the note has no author until it's written).
+	if _active and _preview_origin.x >= 0:
+		var pf := BLOCK_FILL
+		pf.a = 0.30
+		for pc in _footprint_cells(_preview_origin):
+			draw_rect(Rect2(pc.x * s, pc.y * s, s, s), pf, true)
+		var side := _footprint_side()
+		var outline := Rect2(_preview_origin.x * s, _preview_origin.y * s, side * s, side * s)
+		draw_rect(outline, BLOCK_EDGE, false, 1.5)
 
 
 # --- hover tooltip + zone-overlay fade --------------------------------------------------------
@@ -287,9 +305,24 @@ func _process(delta: float) -> void :
 	if new_preview != _preview_origin:
 		_preview_origin = new_preview
 		update()
-	# Tooltip follows the mouse (offset lower-right so the pointer doesn't cover the text).
+	# Tooltip follows the mouse (offset lower-right so the pointer doesn't cover the text). In a
+	# multiplayer session it's prefixed with the note author's name and its border is tinted the
+	# author's colour; solo it stays the default warm tan.
 	if hovered_cell != null:
-		_tip_label.text = text
+		var display := text
+		var border := BLOCK_EDGE
+		var author: int = 0
+		if _sync.has_method("get_author"):
+			author = int(_sync.get_author(hovered_cell))
+		if author != 0:
+			var mp := _get_mp()
+			if mp != null:
+				if mp.has_method("get_player_name"):
+					display = str(mp.get_player_name(author)) + ": " + text
+				if mp.has_method("get_player_color"):
+					border = mp.get_player_color(author)
+		_tip_label.text = display
+		_set_tip_border(border)
 		_tip_panel.rect_position = get_viewport().get_mouse_position() + Vector2(18, 20)
 		_show_tooltip()
 	else:
@@ -327,6 +360,14 @@ func _approach(cur: float, target: float, delta: float) -> float:
 	if cur < target:
 		return min(cur + step, target)
 	return max(cur - step, target)
+
+
+func _set_tip_border(c: Color) -> void :
+	if _tip_panel == null:
+		return
+	var sb = _tip_panel.get_stylebox("panel")
+	if sb is StyleBoxFlat:
+		sb.border_color = c
 
 
 func _show_tooltip() -> void :
