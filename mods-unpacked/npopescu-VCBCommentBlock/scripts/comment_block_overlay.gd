@@ -5,29 +5,39 @@ extends Node2D
 # Added under Main/World (sibling of CursorBoard) so it shares the board's pixel coordinate space
 # and pans/zooms with the camera, exactly like the brush cursor. It:
 #   • draws every placed comment block (from CommentBlockSync);
-#   • shows a comment as a tooltip that FOLLOWS the mouse (down-right) with a stock-style
-#     fade in/out (a Tween on modulate, like the game's own UI) whenever the pointer is over a
-#     block — in edit mode AND during simulation (view-only);
-#   • in "comment mode" (our toolbar button), routes board clicks to place a block (empty cell),
-#     open the editor popup (existing block, left click), or delete a block (right click).
+#   • shows a comment as a tooltip that FOLLOWS the mouse (down-right) with a stock-style fade
+#     in/out (a Tween on modulate, like the game's own UI) whenever the pointer is over a block —
+#     in edit mode AND during simulation (view-only);
+#   • when the Comment "ink" is the selected ink, DRAWS comment blocks with the mouse just like a
+#     trace: left click / left drag places blocks; right click / right drag erases; and a plain
+#     left click on an existing block opens its text editor.
 #
-# Comment mode suppresses drawing by requesting the editor tool NONE, so the normal tools don't
-# paint while you place/edit comments; picking any real tool (or entering simulation) leaves
-# comment mode automatically.
+# The comment ink is a real member of the ink ButtonGroup (added to the palette's "Annotation" row
+# and to the Q/A quick menu). Selecting it deselects the current ink; picking any other ink (or a
+# tool, or starting a simulation) leaves comment drawing again. While the comment ink is active the
+# editor tool is held at NONE so the normal tools don't paint over the board — the mod places
+# comment blocks itself.
 
-const BLOCK_FILL := Color(0.882, 0.745, 0.514, 0.45)   # warm, semi-transparent (placeholder)
+# Comment block look — a warm translucent note colour that no vanilla ink uses (kept in sync with
+# comment_ink_button.gd's COMMENT_COLOR).
+const BLOCK_FILL := Color(0.882, 0.745, 0.514, 0.45)
 const BLOCK_EDGE := Color(0.882, 0.745, 0.514, 0.95)
 const BLOCK_GLYPH := Color(0.15, 0.12, 0.07, 0.9)
 
 var _sync: Node = null
 var _editor: Node = null
 var _window: Node = null
-var _buttons := []   # every "select comment" toggle (toolbar + palette + quick-menu), kept in sync
+var _buttons := []   # every comment-ink button (palette + quick-menu), kept selected-in-sync
 
 var _cell := 8
-var _comment_mode := false
+var _active := false          # the comment ink is the selected ink → we're drawing comments
 var _is_world_frame := false
 var _prev_tool := -1
+var _prev_ink_id := ""
+
+# Drag state (so a held drag paints / erases blocks like a trace).
+var _drag_place := false
+var _drag_erase := false
 
 # Tooltip (screen-space, on its own CanvasLayer so it ignores the board camera transform).
 var _tip_layer: CanvasLayer
@@ -44,8 +54,8 @@ func setup(sync: Node, editor: Node, window: Node) -> void :
 	_window = window
 
 
-# Register a "select comment" toggle button (the toolbar button, the palette ink entry, the
-# quick-menu entry). Its `toggled` drives comment mode; all registered buttons are kept in sync.
+# Register a comment-ink button (the palette entry, the quick-menu entry). Its `toggled` drives
+# comment drawing; all registered buttons are kept selected-in-sync.
 func register_button(button) -> void :
 	if button == null or button in _buttons:
 		return
@@ -178,17 +188,21 @@ func _on_tip_tween_done() -> void :
 		_tip_panel.visible = false
 
 
-# --- comment mode -----------------------------------------------------------------------------
-# A "select comment" button was toggled by the user (clicked, or hover-selected in the quick menu).
+# --- selecting / deselecting the comment ink --------------------------------------------------
+# A comment-ink button was toggled (clicked in the palette, or hover-selected in the quick menu).
+# Pressed → the comment ink is now the selected ink (draw comments); unpressed → another ink in the
+# same ButtonGroup was picked (go back to drawing that ink).
 func _on_comment_button_toggled(pressed: bool) -> void :
 	if pressed:
-		enter_comment_mode()
+		_enter()
 	else:
-		exit_comment_mode(true)
+		# Another ink in the group was chosen — it is already active and highlighted, so just stop
+		# drawing comments and hand the tool back.
+		_leave(true, false)
 
 
-func enter_comment_mode() -> void :
-	if _comment_mode:
+func _enter() -> void :
+	if _active:
 		return
 	if _editor != null and not bool(_editor.get("is_in_editor")):
 		# Can't place comments while simulating; bounce the buttons back off.
@@ -196,87 +210,114 @@ func enter_comment_mode() -> void :
 		return
 	if _editor != null:
 		_prev_tool = int(_editor.get("editor_tool"))
-	_comment_mode = true
-	# Suppress the normal drawing tools while placing/editing comments.
+		_prev_ink_id = String(_editor.get("indexed_color_id"))
+	_active = true
+	_drag_place = false
+	_drag_erase = false
+	# Hold the normal drawing tools at NONE so they don't paint while we place comment blocks.
 	E.emit_signal("ed_tool_change_emitted", true, Editor.TOOL.NONE)
 	_sync_buttons()
 
 
-func exit_comment_mode(restore_tool: bool) -> void :
-	if not _comment_mode:
+# Stop drawing comments. `restore_tool` puts the editor tool back to what it was before (used when
+# an ink was picked — inks don't change the tool, but we clobbered it to NONE on enter).
+# `repick_ink` re-selects the previously active ink so the ink grid isn't left with nothing
+# highlighted (used when the exit wasn't itself an ink pick).
+func _leave(restore_tool: bool, repick_ink: bool) -> void :
+	if not _active:
 		return
-	_comment_mode = false
+	_active = false
+	_drag_place = false
+	_drag_erase = false
 	if restore_tool:
 		var t := _prev_tool
 		if t < 0 or t == Editor.TOOL.NONE or t == Editor.TOOL.SIMULATOR:
 			t = Editor.TOOL.ARRAY
 		E.emit_signal("ed_tool_change_emitted", true, t)
 	_sync_buttons()
+	if repick_ink and _prev_ink_id != "":
+		E.echo(E.ed_indexed_color_pick, {
+			E.ed_indexed_color_pick.p_indexed_color_id: _prev_ink_id, })
 
 
-# Picking an ink (palette or quick menu) leaves comment mode — the user chose to draw. (Also
-# covered by the palette/quick-menu comment buttons sharing the ink group, but this backs up the
-# toolbar button and any peer that isn't grouped.)
+# Backup for a comment button that couldn't join the ink ButtonGroup: picking a real ink still
+# emits this, so leave comment drawing (the new ink is already active).
 func _ev_ed_indexed_color_change(_mode: int, _args: Dictionary) -> void :
-	if _comment_mode:
-		exit_comment_mode(true)
+	if _active:
+		_leave(true, false)
 
 
-# Any real tool becoming active (toolbar pick, or entering simulation) leaves comment mode.
+# A real tool was picked while drawing comments — keep the tool the user chose, but hand the ink
+# highlight back to the previous ink.
 func _on_tool_change(is_request: bool, new_tool: int) -> void :
 	if is_request:
 		return
-	if _comment_mode and new_tool != Editor.TOOL.NONE:
-		_comment_mode = false
-		_sync_buttons()
+	if not _active:
+		return
+	if new_tool == Editor.TOOL.NONE:
+		return
+	_leave(false, true)
 
 
 func _on_mi_mode_change(is_simulation_requested: bool) -> void :
 	for b in _buttons:
 		if is_instance_valid(b):
 			b.disabled = is_simulation_requested
-	if is_simulation_requested and _comment_mode:
-		_comment_mode = false
-		_sync_buttons()
+	if is_simulation_requested and _active:
+		_leave(false, true)
 
 
-# Reflect comment_mode on every registered button, without re-triggering their `toggled` signals.
+# Reflect the comment-active state on every comment button, without re-triggering their `toggled`
+# signals. Setting the palette button pressed also (via its shared ButtonGroup) deselects the ink.
 func _sync_buttons() -> void :
 	for b in _buttons:
 		if not is_instance_valid(b):
 			continue
 		b.set_block_signals(true)
-		b.pressed = _comment_mode
+		b.pressed = _active
 		b.set_block_signals(false)
 
 
-# --- board input (place / edit / delete) ------------------------------------------------------
+# --- board input (place / edit / delete, click AND drag) --------------------------------------
 func _ev_ui_context_change(_mode: int, _args: Dictionary) -> void :
 	var p_stable_context: int = _args[E.ui_context_change.p_stable_context]
 	_is_world_frame = p_stable_context == C.CONTEXT.WORLD_FRAME
 
 
 func _ev_mi_mouse_input_on_board(_mode: int, _args: Dictionary) -> void :
-	if not _comment_mode or _sync == null:
+	if not _active or _sync == null:
 		return
 	if _editor != null and not bool(_editor.get("is_in_editor")):
 		return
 	var p_position: Vector2 = _args[E.mi_mouse_input_on_board.p_position]
+	var p_is_pressed: bool = _args[E.mi_mouse_input_on_board.p_is_pressed]
 	var p_is_just_pressed: bool = _args[E.mi_mouse_input_on_board.p_is_just_pressed]
+	var p_is_just_released: bool = _args[E.mi_mouse_input_on_board.p_is_just_released]
 	var p_is_left_click: bool = _args[E.mi_mouse_input_on_board.p_is_left_click]
-	if not p_is_just_pressed:
+	if p_is_just_released:
+		_drag_place = false
+		_drag_erase = false
 		return
 	if not C.CIRCUIT.RECT.has_point(p_position):
 		return
 	var cell := _sync.cell_of(p_position)
 	if p_is_left_click:
-		if _sync.has_block(cell):
-			_open_editor(cell)
-		else:
-			_sync.place(cell, true)
+		if p_is_just_pressed:
+			if _sync.has_block(cell):
+				# A plain click on an existing block opens its editor (don't start a paint-drag).
+				_drag_place = false
+				_open_editor(cell)
+			else:
+				_sync.place(cell, true)
+				_drag_place = true
+		elif p_is_pressed and _drag_place:
+			if not _sync.has_block(cell):
+				_sync.place(cell, true)
 	else:
-		# Right click removes the block under the cursor (re-groups the rest).
-		if _sync.has_block(cell):
+		# Right button erases (click + drag), like erasing a trace.
+		if p_is_just_pressed:
+			_drag_erase = true
+		if _drag_erase and _sync.has_block(cell):
 			_sync.remove(cell, true)
 
 
