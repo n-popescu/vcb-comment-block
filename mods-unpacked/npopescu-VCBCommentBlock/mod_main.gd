@@ -110,8 +110,65 @@ func _build(root: Node, main: Node, editor: Node, world: Node, file_controls: No
 			btn.theme = theme_res
 		file_controls.add_child(btn)
 		if overlay != null:
-			overlay.set_button(btn)
-			var _e = btn.connect("toggled", overlay, "_on_comment_button_toggled")
+			overlay.register_button(btn)
+
+	# 5) Palette entry: a comment "ink" in the right-bar ink grid, sharing the inks' ButtonGroup so
+	#    it selects/deselects like any other ink.
+	var inks := main.find_node("Inks", true, false)
+	if inks != null:
+		var ink_vbox := inks.get_node_or_null("VBoxContainer")
+		if ink_vbox != null and ink_vbox.get_node_or_null("CommentInkRow") == null:
+			var grp = _find_ink_group(ink_vbox)
+			var row := HBoxContainer.new()
+			row.name = "CommentInkRow"
+			var pbtn = _new_script(SCRIPTS + "/comment_ink_button.gd")
+			if pbtn != null:
+				pbtn.name = "BtnCommentInk"
+				if grp != null:
+					pbtn.group = grp
+				row.add_child(pbtn)
+				ink_vbox.add_child(row)
+				if overlay != null:
+					overlay.register_button(pbtn)
+
+	# 6) Quick-menu entry (the Q/A ink-switch radial): add a comment button to its button list so
+	#    it's hover-selectable there too.
+	var qm := main.get_node_or_null("Interface/GUI/InkSwitchMenu")
+	if qm != null:
+		var flow := qm.get_node_or_null("PanelContainer/HBoxContainer/HFlowContainer")
+		if flow != null and flow.get_node_or_null("BtnCommentInk") == null:
+			var qbtn = _new_script(SCRIPTS + "/comment_ink_button.gd")
+			if qbtn != null:
+				qbtn.name = "BtnCommentInk"
+				var qgrp = _quickmenu_group(qm)
+				if qgrp != null:
+					qbtn.group = qgrp
+				flow.add_child(qbtn)
+				if qbtn.has_method("public_enable_ink_switch_usage"):
+					qbtn.public_enable_ink_switch_usage()
+				# Make it hover-selectable like the menu's own buttons.
+				if ("buttons" in qm) and typeof(qm.buttons) == TYPE_ARRAY:
+					qm.buttons.append(qbtn)
+				if overlay != null:
+					overlay.register_button(qbtn)
+
+
+# The ButtonGroup shared by the ink-bar's ink buttons (read off the first grouped TextureButton).
+func _find_ink_group(ink_vbox: Node):
+	for hbox in ink_vbox.get_children():
+		for child in hbox.get_children():
+			if child is TextureButton and child.group != null:
+				return child.group
+	return null
+
+
+# The ButtonGroup the quick menu built for its buttons (assigned in its _ready).
+func _quickmenu_group(qm: Node):
+	if ("buttons" in qm) and typeof(qm.buttons) == TYPE_ARRAY and qm.buttons.size() > 0:
+		var b = qm.buttons[0]
+		if b != null:
+			return b.group
+	return null
 
 
 # Instance a mod script, or null (logged) if it can't be loaded — never dereference a null.
