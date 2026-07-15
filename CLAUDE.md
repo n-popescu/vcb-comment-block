@@ -163,6 +163,26 @@ mods use to add their own controls to the circuit-editor panel.
   v1.2.1: `mod_main.gd` and `file_system.gd` both had `var sync`). Use `sync_node` etc. You can
   parse-check locally with `gdtoolkit` (build the parser fresh with `Parser().disable_grammar_caching()`
   to dodge its stale pickled grammar).
+- **`:=` type inference is a loaded gun — it caused the "nothing appears" bug.** In Godot 3.5,
+  `var x := <expr>` is a **fatal parse error** ("The assigned value doesn't have a set type; the
+  variable type can't be inferred") whenever the compiler can't statically determine the RHS type —
+  most commonly a method call on a `Node`-typed variable (e.g. `var cell := _sync.cell_of(pos)`
+  where `_sync: Node`), a call to a `void` function, or `var x := null`. **gdtoolkit does NOT catch
+  this** (it only checks grammar). Such an error makes the whole script fail to compile; then
+  `_new_script()`'s `scr.new()` returns null, `_build_core()` returns false forever, and the mod
+  shows **nothing at all** — no overlay, no tooltip, no palette/quick-menu buttons. This is exactly
+  why the comment block never appeared through v1.3.0 (`comment_block_overlay.gd` had two
+  `var cell := _sync.cell_of(...)` lines). Fix: give the var an explicit type
+  (`var cell: Vector2 = _sync.cell_of(...)`) or drop inference (`var x = ...`). Prefer `:=` only when
+  the RHS type is obvious to the compiler (literals, typed-return built-ins, `String(...)`, etc.).
+- **Compile-check with a real Godot 3.5.1, not just gdtoolkit.** gdtoolkit misses identifier
+  resolution and `:=` inference errors. Definitive local check (this is how the v1.3.1 bug was
+  found): download `Godot_v3.5.1-stable_linux_headless.64`, make a throwaway project with stub
+  autoloads (`C`, `E`) and stub `class_name`s (`Editor`, `ModLoaderLog`, `ModLoaderMod`) providing
+  the symbols the mod uses, then in a main scene `_ready` do `load("res://…/script.gd").can_instance()`
+  for each mod script — `can_instance()` is `true` only if the script fully compiled. Autoloads are
+  only registered when the project actually runs (not with `--check-only --script`), so run the
+  project headless rather than checking single scripts in isolation.
 - **Tabs, not spaces**, in every `.gd`. Quick check: `grep -nP '^\t* +\S' <file>` must be empty
   for lines you add.
 - `C` and `E` are the game's autoloads (always present); `Editor` is a `class_name`. `MP` /
