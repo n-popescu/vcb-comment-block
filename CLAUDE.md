@@ -25,20 +25,35 @@ stored in the mod's own data and persisted in the `.vcb`'s `modded` field.
 ## 2. Architecture (4 pieces + 1 extension)
 
 ```
-mod_main.gd                     waits for Main, then builds the nodes below + installs the extension
+mod_main.gd                     waits for Main, registers the COMMENT ink, builds the nodes below + installs the extension
 scripts/comment_block_sync.gd   /root/CommentBlockSync : the data model + adjacency + MP RPCs + save API
 scripts/comment_block_overlay.gd  Main/World/CommentBlockOverlay : draws blocks, hover tooltip, board draw/erase routing
-scripts/comment_ink_button.gd   the palette + quick-menu "comment" ink entry (a toggle TextureButton styled like an ink)
+scripts/comment_ink_button.gd   the palette + quick-menu "comment" ink button — a clone of the game's own button_ink.gd (indexed_color_id="COMMENT")
 scripts/gui/comment_edit_window.gd  Main/CommentBlockUI/CommentEditWindow : the editor popup (note-zone TextEdit)
 extensions/file_system.gd       persists blocks in the .vcb "modded" field (script extension)
 ```
 
-The comment block is a **real ink**, not a separate "mode": `mod_main` inserts the comment button
+The comment block is a **real ink**, not a separate "mode". `mod_main` first **registers a
+`"COMMENT"` entry in `C.PALETTE`** (the ink "variables" every ink button reads — id, accent, name;
+`STATSTYPE -1` so it's skipped by the statistics panel, and a warm-tan colour no vanilla ink uses).
+`C.PALETTE` is a `const` Dictionary but GDScript 3.5 lets you mutate its **contents** at runtime, so
+this adds a first-class ink without touching `vcb.pck`. The comment buttons
+(`comment_ink_button.gd`) are a faithful clone of the game's own `button_ink.gd`: they carry
+`indexed_color_id = "COMMENT"` and emit the same `ed_indexed_color_change` / `ed_indexed_color_pick`
+events, so the game treats COMMENT exactly like DECORATION/FILLER/NONE. `mod_main` inserts a button
 into the palette's **Annotation** row (`Inks/VBoxContainer/HBoxContainer6`, between `BtnFiller` and
 `BtnNone`) and into the Q/A quick menu (`InkSwitchMenu/PanelContainer/HBoxContainer/HFlowContainer2`,
-between `BtnFiller` and `BtnNone`), joined to each bar's ink `ButtonGroup`. Wiring is retried across
-frames (the docked circuit editor + the quick menu's `buttons` list build a little after `Main`
-appears). There is **no toolbar toggle button** anymore.
+between `BtnFiller` and `BtnNone`), joined to each bar's ink `ButtonGroup` and appended to the quick
+menu's `buttons` list. Wiring is retried across frames (the docked circuit editor + the quick menu's
+`buttons` list build a little after `Main` appears); if it ever times out, `mod_main._diagnose()`
+logs which of `Main`/`Inks`/`InkSwitchMenu`/`qm.buttons` was still missing. There is **no toolbar
+toggle button**.
+
+**Why runtime injection (not a scene edit):** the launcher's Mod Loader loads each mod zip with
+`ProjectSettings.load_resource_pack(path, false)` — `replace_files = false` — so a mod **cannot**
+override a vanilla resource such as `circuit_editor.tscn`. Adding the button (and the palette entry)
+at runtime is the only mechanism available; it's the same technique the Board Size and Improvements
+mods use to add their own controls to the circuit-editor panel.
 
 ### 2.1 Data model + grouping (`comment_block_sync.gd`)
 - Blocks snap to a grid of `CELL_SIZE` (8) board pixels. `_cells = {"cx,cy": true}`.
@@ -61,17 +76,21 @@ appears). There is **no toolbar toggle button** anymore.
   `get_viewport().get_mouse_position() + (18,20)` each frame, faded with a `Tween` on `modulate`
   (0.12 s `TRANS_SINE`) — the same fade idiom the stock UI uses (`notes.gd`,
   `flux_btn_checkbox.gd`). Works in edit AND sim.
-- **Selecting the comment ink** (drawing comments): the comment ink is a real member of each bar's
-  ink `ButtonGroup`, so selecting it deselects the current ink (and vice-versa). Both comment
-  buttons register with the overlay via `register_button` and are kept selected-in-sync by
-  `_sync_buttons` (block-signalled; setting the palette button pressed also unpresses the ink via
-  its group). On `_enter` the overlay remembers the previous tool + ink and **holds the editor tool
+- **Selecting the comment ink** (drawing comments): because the comment buttons are real inks, the
+  overlay keys its state off the **authoritative `ed_indexed_color_change` event** (not off the
+  buttons' `toggled` — that turned out fragile). `_ev_ed_indexed_color_change`: id `== "COMMENT"` →
+  `_enter()`; any other id → record it as the "previous ink" and, if active, `_leave()`. The two
+  comment buttons (palette + quick menu) stay in sync automatically the way native inks do — each
+  responds to `ed_indexed_color_pick("COMMENT")` by pressing itself, and each bar's `ButtonGroup`
+  unpresses the rest. They still `register_button` with the overlay, but only so it can disable them
+  during simulation. On `_enter` the overlay remembers the previous tool and **holds the editor tool
   at `NONE`** (`ed_tool_change_emitted`) so the normal tools don't paint while we place comment
   blocks (the editor's `_ev_mi_mouse_input_on_board` has no branch for `NONE`). `_leave(restore_tool,
-  repick_ink)` covers every exit: picking another **ink** (`toggled(false)` on the group, or the
-  `ed_indexed_color_change` backup) restores the previous tool (the new ink is already active);
-  picking a real **tool** keeps that tool but re-picks the previous ink so the grid isn't left with
-  nothing highlighted; **simulation** start re-picks the ink and disables the buttons.
+  repick_ink)` covers every exit: picking another **ink** restores the previous tool (the new ink is
+  already active); picking a real **tool** keeps that tool but re-picks the previous ink so the grid
+  isn't left with nothing highlighted; **simulation** start re-picks the ink and disables the
+  buttons. `_prev_ink_id` is seeded from the editor's current ink in `_ready` so the first pick can
+  always be handed back.
 - **Board draw/erase** (via `E.mi_mouse_input_on_board`, only while the comment ink is active + edit
   mode + inside `C.CIRCUIT.RECT`): it draws like a trace — **left** click/drag `place`s blocks
   (drag tracked with `_drag_place`); a plain left click on an **existing** block opens the popup
@@ -111,16 +130,24 @@ appears). There is **no toolbar toggle button** anymore.
   `editor.gd` here: the Multiplayer mod reproduces `_ev_mi_mouse_input_on_board` verbatim, so
   chaining a second override is fragile — hence the `TOOL.NONE` approach instead.)
 - **Default look is a colour + glyph**, not a texture. The palette/quick-menu button uses the
-  game's white `text_symbol.png` glyph tinted by a `FluxModTextureButton` accent (`COMMENT_COLOR`),
-  matching native ink buttons. When a real texture exists, set it as `comment_ink_button`'s
+  game's white `text_symbol.png` glyph tinted by a `FluxModTextureButton` accent read from the
+  registered `C.PALETTE["COMMENT"].ON` (falling back to `COMMENT_ACCENT` if the entry is somehow
+  missing), matching native ink buttons. When a real texture exists, set it as `comment_ink_button`'s
   `texture_normal` and swap the overlay `_draw` rect for a `draw_texture_rect`; tune `CELL_SIZE`.
 - **Palette/quick-menu placement**: the comment ink is inserted into the palette's `HBoxContainer6`
   ("Annotation" row) between `BtnFiller`/`BtnNone`, and into the quick menu's `HFlowContainer2`
   between `BtnFiller`/`BtnNone`, joined to each bar's `ButtonGroup` (read off `BtnNone` / the menu's
-  `buttons[0]`). Wiring retries across frames until both bars exist (docking builds the circuit
-  editor, and the menu fills `buttons` in its `_ready`, a little after `Main` appears). The old
-  "no ink highlighted after leaving comment" quirk is handled: `_leave(..., repick_ink=true)`
-  re-`ed_indexed_color_pick`s the previous ink on non-ink exits.
+  `buttons[0]`) and appended to `qm.buttons`. Wiring retries across frames until both bars exist
+  (docking builds the circuit editor, and the menu fills `buttons` in its `_ready`, a little after
+  `Main` appears); a timeout logs `_diagnose()` (which of Main/Inks/InkSwitchMenu/qm.buttons was
+  missing). Enter/leave is driven by `ed_indexed_color_change`, so the "no ink highlighted after
+  leaving comment" quirk is handled by `_leave(..., repick_ink=true)` on non-ink exits.
+- **`C.PALETTE["COMMENT"]` registration**: relies on GDScript 3.5 allowing mutation of a `const`
+  Dictionary's contents. It's a first-class ink but is never actually painted (the overlay holds
+  `TOOL.NONE`), so the engine never sees it. The colour (`e1be83`) is unique, so the eyedropper
+  (`tool_color_picker.gd`) and mouse-over readout (`mouse_over_label.gd`) never mis-match it, and
+  `STATSTYPE -1` keeps it out of `card_statistics.gd`. If a future engine build makes const dicts
+  read-only, the button falls back to `COMMENT_ACCENT` and still works.
 - **MP**: both peers need this mod. Text streaming + place/remove + late-join sync are implemented;
   a same-instant place-and-type race on the exact same new group is not specially resolved (last
   writer wins, self-healing on the next edit / re-open).

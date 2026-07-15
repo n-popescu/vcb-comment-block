@@ -8,16 +8,22 @@ extends Node
 # don't affect the circuit. Adjacent blocks merge into one comment. Everything is synced over the
 # Multiplayer mod when a session is live, and persisted inside the .vcb file.
 #
-# The comment block is a real ink: it appears in the palette's "Annotation" row (between Filler and
-# None) and in the Q/A quick menu (between Filler and None), joined to the inks' ButtonGroup. Pick
-# it like any ink and draw comment blocks with the mouse (see comment_block_overlay.gd).
+# The comment block is a real ink. It is registered as a "COMMENT" entry in the ink "variables"
+# (C.PALETTE) and its buttons clone the game's own ink button (comment_ink_button.gd, modelled on
+# button_ink.gd), so the game treats it exactly like the Annotation inks (DECORATION/FILLER/NONE):
+# it appears in the palette's "Annotation" row (between Filler and None) and in the Q/A quick menu
+# (between Filler and None), joined to each bar's ink ButtonGroup, and picking it announces the
+# COMMENT ink like any ink. The overlay watches for the COMMENT ink becoming active and, while it
+# is, holds the editor tool at NONE (so nothing is painted) and places editor-only comment blocks
+# itself (see comment_block_overlay.gd).
 #
 # Like the Board Size Modifier's mod_main, this waits for the Main scene and grafts on its own
 # nodes:
+#   • the "COMMENT" ink entry in C.PALETTE (the ink variables).
 #   • /root/CommentBlockSync   — the data model + MP RPC node (stable path so rpc() resolves).
 #   • Main/World/CommentBlockOverlay — draws the blocks + the hover tooltip, routes board input.
 #   • Main/CommentBlockUI (CanvasLayer) → CommentEditWindow — the editor popup.
-#   • the comment ink entries in the palette + quick menu.
+#   • the comment ink buttons in the palette (HBoxContainer6) + quick menu (HFlowContainer2).
 # It also installs a file_system script extension to save/load the blocks in the .vcb.
 
 const MOD_DIR := "npopescu-VCBCommentBlock"
@@ -27,6 +33,7 @@ const EXTENSIONS := MOD_ROOT + "/extensions"
 const MAIN_THEME := "res://src/gui/themes/main_theme.tres"
 
 var _core_built := false
+var _ink_registered := false
 var _palette_wired := false
 var _quickmenu_wired := false
 # The circuit-editor panel and the quick menu build themselves a little after Main appears (docking
@@ -52,6 +59,10 @@ func _ready() -> void :
 
 
 func _process(_delta: float) -> void :
+	# Register the "COMMENT" ink in the palette's "variables" (C.PALETTE) first, so the comment
+	# buttons are real inks the game recognises the moment they're built.
+	if not _ink_registered:
+		_ink_registered = _register_comment_ink()
 	if not _core_built:
 		if not _build_core():
 			return
@@ -66,9 +77,47 @@ func _process(_delta: float) -> void :
 		set_process(false)
 	elif _wire_frames > _WIRE_LIMIT:
 		ModLoaderLog.warning(
-			"Gave up wiring the comment ink (palette=%s, quickmenu=%s)." % [_palette_wired, _quickmenu_wired],
+			"Gave up wiring the comment ink (palette=%s, quickmenu=%s). %s"
+				% [_palette_wired, _quickmenu_wired, _diagnose()],
 			MOD_DIR)
 		set_process(false)
+
+
+# Register a "COMMENT" ink in C.PALETTE — the ink "variables" every native ink button reads from.
+# This is what makes the comment entry a real, first-class ink (its accent, name and id all come
+# from here), exactly like DECORATION / FILLER / NONE in the Annotation row. STATSTYPE -1 keeps it
+# out of the statistics panel (as Annotation/Background are), and its warm-tan colour is one no
+# vanilla ink uses, so it never collides with the eyedropper or the mouse-over readout. The ink is
+# never painted onto the board — the overlay intercepts it (holding the tool at NONE) and places
+# editor-only comment blocks instead. Idempotent; returns true once handled.
+func _register_comment_ink() -> bool:
+	if typeof(C.PALETTE) != TYPE_DICTIONARY:
+		return true
+	if not C.PALETTE.has("COMMENT"):
+		C.PALETTE["COMMENT"] = {
+			"ID": "COMMENT",
+			"EDITOR": "e1be83",
+			"ON": "e1be83",
+			"OFF": "e1be83",
+			"NAME": "Comment",
+			"STATSTYPE": - 1,
+			"ICONFILE": "text_symbol",
+		}
+		ModLoaderLog.info("Registered the COMMENT ink in C.PALETTE.", MOD_DIR)
+	return true
+
+
+# One-line report of which nodes the wiring is still missing — logged if wiring times out, so the
+# failure is diagnosable from user://ModLoader.log without a debugger.
+func _diagnose() -> String:
+	var inks_ok := _main != null and _main.find_node("Inks", true, false) != null
+	var qm := null
+	if _main != null:
+		qm = _main.get_node_or_null("Interface/GUI/InkSwitchMenu")
+	var qm_ok := qm != null
+	var qm_buttons_ok := qm_ok and ("buttons" in qm) and typeof(qm.buttons) == TYPE_ARRAY and not qm.buttons.empty()
+	return "[diag main=%s Inks=%s InkSwitchMenu=%s qm.buttons=%s]" % [
+		_main != null, inks_ok, qm_ok, qm_buttons_ok]
 
 
 # Build the always-needed nodes (data model, overlay, editor popup). Returns true once done.

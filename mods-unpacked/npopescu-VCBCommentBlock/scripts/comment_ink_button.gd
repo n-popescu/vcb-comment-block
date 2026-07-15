@@ -1,22 +1,33 @@
 extends TextureButton
 
 # comment_ink_button.gd — the Comment Block entry in the ink palette (right bar, "Annotation" row)
-# and the Q/A quick menu. It is a real ink-style toggle button: you pick it like any other ink and
-# then draw comment blocks on the board with it (see comment_block_overlay.gd). It is NOT a separate
-# "mode" — selecting it deselects the current ink (they share the ButtonGroup), and picking any
-# other ink deselects it.
+# and in the Q/A quick menu.
 #
-# To look and behave exactly like a native ink button it is a TextureButton with the game's white
-# glyph icon (tinted by a FluxModTextureButton accent, just like button_ink.gd), and it exposes the
-# handful of public_* methods the ink-switch quick menu calls on the buttons in its list.
+# This is a faithful clone of the game's own ink button (src/gui/sidepanels/circuit_editor/
+# button_ink.gd): a real ink whose "type id" (indexed_color_id) is "COMMENT". Selecting it emits
+# the same ed_indexed_color_change / ed_indexed_color_pick events every native ink emits, so the
+# game treats it as THE selected ink — it joins the ink ButtonGroup, deselects the previous ink,
+# and re-presses itself when "COMMENT" is picked from anywhere (the palette, the Q/A menu, an
+# eyedrop, …). mod_main registers the matching "COMMENT" entry in C.PALETTE (the ink "variables")
+# before this button is built, so the accent tint reads straight from the palette like any ink.
+#
+# The comment ink is NOT painted onto the board: comment_block_overlay.gd watches for the "COMMENT"
+# ink becoming active and, while it is, holds the editor tool at NONE (so nothing is painted) and
+# places editor-only comment blocks itself. That keeps the comment ink purely a decoration that the
+# simulation engine never sees.
 
+const COMMENT_ID := "COMMENT"
 const ICON_PATH := "res://assets/icons/18px/text_symbol.png"
 const FLUX_TSCN := "res://src/gui/flux/flux_mod_btn_texture.tscn"
 
-# The comment "ink" colour. Deliberately a warm note/sticky tan that no vanilla ink uses, so a
-# comment block reads as an annotation rather than a circuit component. Kept in sync with the
-# overlay's BLOCK_* colours.
-const COMMENT_COLOR := Color("e1be83")
+# Fallback tint used only if the "COMMENT" palette entry somehow isn't registered. A warm note/
+# sticky tan that no vanilla ink uses (kept in sync with the overlay's BLOCK_* colours and the
+# palette entry mod_main registers).
+const COMMENT_ACCENT := Color("e1be83")
+
+# The button's ink "type id" — mirrors the exported var on the native ink buttons.
+var indexed_color_id := COMMENT_ID
+var is_filter_usage := false
 
 var _flux: Node = null
 
@@ -29,19 +40,86 @@ func _ready() -> void :
 	if rect_min_size == Vector2.ZERO:
 		rect_min_size = Vector2(26, 26)
 	if hint_tooltip == "":
-		hint_tooltip = "Comment block — annotate the board (editor-only, never simulated)"
-	texture_normal = _load_icon()
-	# The native ink accent overlay (background panel + hover/press tinting). Tints this button's
-	# white glyph to the comment colour, matching every other ink button.
+		hint_tooltip = "Comment — annotate the board (editor-only, never simulated)"
+	if texture_normal == null:
+		texture_normal = _load_icon()
+	E.follow_events(self, [
+		E.ed_indexed_color_pick,
+	])
+	var _e = connect("toggled", self, "_on_button_toggled")
+	# The native ink accent overlay (background panel + hover/press tinting). Built as a child so it
+	# behaves exactly like $FluxModTextureButton on a native ink button.
 	_flux = _make_flux()
 	if _flux != null:
 		add_child(_flux)
 		if _flux.has_method("public_set_inkmode_accent"):
-			_flux.public_set_inkmode_accent(COMMENT_COLOR)
+			_flux.public_set_inkmode_accent(_accent())
 
 
-# The game's icons are white glyphs (the accent overlay colours them); load the stock text glyph,
-# or fall back to a generated one if it's somehow missing.
+# The comment ink's accent colour — read from the registered palette entry, or the fallback tan.
+func _accent() -> Color:
+	if typeof(C.PALETTE) == TYPE_DICTIONARY and C.PALETTE.has(indexed_color_id):
+		var entry = C.PALETTE[indexed_color_id]
+		if typeof(entry) == TYPE_DICTIONARY and entry.has("ON"):
+			return Color(entry["ON"])
+	return COMMENT_ACCENT
+
+
+# Picked (pressed) → announce the comment ink as the selected ink, exactly like a native ink does.
+func _on_button_toggled(new_state: bool) -> void :
+	if is_filter_usage:
+		return
+	if indexed_color_id == "":
+		return
+	if new_state:
+		E.echo(E.ed_indexed_color_change, {
+			E.ed_indexed_color_change.p_indexed_color_id: indexed_color_id, })
+		E.echo(E.ed_indexed_color_pick, {
+			E.ed_indexed_color_pick.p_indexed_color_id: indexed_color_id, })
+
+
+# The comment ink was picked from somewhere else (the other bar, prev/next, …) → reflect it here,
+# so the palette and the Q/A menu stay in sync just like the native inks.
+func _ev_ed_indexed_color_pick(_mode: int, _args: Dictionary) -> void :
+	var p_indexed_color_id: String = _args[E.ed_indexed_color_pick.p_indexed_color_id]
+	if is_filter_usage:
+		return
+	if indexed_color_id == "":
+		return
+	if indexed_color_id == p_indexed_color_id:
+		pressed = true
+
+
+# --- methods the ink bars / quick menu call on their ink buttons ------------------------------
+func public_unhover() -> void :
+	if _flux != null and _flux.has_method("public_inkmode_set_hovered_false"):
+		_flux.public_inkmode_set_hovered_false()
+
+
+func public_enable_ink_switch_usage() -> void :
+	mouse_filter = Control.MOUSE_FILTER_PASS
+	set_button_mask(0)
+	hint_tooltip = ""
+
+
+func public_enable_filter_usage() -> void :
+	is_filter_usage = true
+	mouse_filter = Control.MOUSE_FILTER_PASS
+	set_button_mask(0)
+	hint_tooltip = ""
+	group = null
+
+
+func public_set_pressed_no_event(p_is_pressed: bool) -> void :
+	var temp_indexed_color_id := indexed_color_id
+	indexed_color_id = ""
+	pressed = p_is_pressed
+	indexed_color_id = temp_indexed_color_id
+
+
+# --- icon ------------------------------------------------------------------------------------
+# The game's icons are white glyphs (the flux accent colours them); load the stock text glyph, or
+# fall back to a generated speech-bubble if it's somehow missing.
 func _load_icon() -> Texture:
 	if ResourceLoader.exists(ICON_PATH):
 		var t = load(ICON_PATH)
@@ -57,14 +135,12 @@ func _fallback_icon() -> ImageTexture:
 	img.fill(Color(0, 0, 0, 0))
 	var w := Color(1, 1, 1, 1)
 	img.lock()
-	# A small speech-bubble outline so it reads as a "comment".
 	for x in range(2, s - 2):
 		img.set_pixel(x, 3, w)
 		img.set_pixel(x, s - 6, w)
 	for y in range(3, s - 5):
 		img.set_pixel(2, y, w)
 		img.set_pixel(s - 3, y, w)
-	# Little tail.
 	img.set_pixel(5, s - 5, w)
 	img.set_pixel(5, s - 4, w)
 	img.set_pixel(6, s - 5, w)
@@ -84,18 +160,3 @@ func _make_flux() -> Node:
 	if inst != null:
 		inst.name = "FluxModTextureButton"
 	return inst
-
-
-# --- methods the ink-switch quick menu calls on its buttons ----------------------------------
-func public_unhover() -> void :
-	if _flux != null and _flux.has_method("public_inkmode_set_hovered_false"):
-		_flux.public_inkmode_set_hovered_false()
-
-
-func public_enable_ink_switch_usage() -> void :
-	mouse_filter = Control.MOUSE_FILTER_PASS
-	set_button_mask(0)
-
-
-func public_enable_filter_usage() -> void :
-	pass

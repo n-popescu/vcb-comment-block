@@ -19,10 +19,14 @@ extends Node2D
 # comment blocks itself.
 
 # Comment block look — a warm translucent note colour that no vanilla ink uses (kept in sync with
-# comment_ink_button.gd's COMMENT_COLOR).
+# comment_ink_button.gd's COMMENT_ACCENT and the C.PALETTE["COMMENT"] entry mod_main registers).
 const BLOCK_FILL := Color(0.882, 0.745, 0.514, 0.45)
 const BLOCK_EDGE := Color(0.882, 0.745, 0.514, 0.95)
 const BLOCK_GLYPH := Color(0.15, 0.12, 0.07, 0.9)
+
+# The comment ink's "type id" — matches the entry mod_main registers in C.PALETTE and the
+# indexed_color_id the comment buttons announce. When this becomes the active ink, we draw comments.
+const COMMENT_ID := "COMMENT"
 
 var _sync: Node = null
 var _editor: Node = null
@@ -54,14 +58,14 @@ func setup(sync_node: Node, editor: Node, window: Node) -> void :
 	_window = window
 
 
-# Register a comment-ink button (the palette entry, the quick-menu entry). Its `toggled` drives
-# comment drawing; all registered buttons are kept selected-in-sync.
+# Register a comment-ink button (the palette entry, the quick-menu entry) so the overlay can
+# disable it during simulation. Selection is NOT driven from here: the comment buttons announce the
+# "COMMENT" ink like every native ink, so the overlay enters/leaves comment drawing from the
+# authoritative `ed_indexed_color_change` event (see `_ev_ed_indexed_color_change`).
 func register_button(button) -> void :
 	if button == null or button in _buttons:
 		return
 	_buttons.append(button)
-	if not button.is_connected("toggled", self, "_on_comment_button_toggled"):
-		var _e = button.connect("toggled", self, "_on_comment_button_toggled")
 
 
 func _ready() -> void :
@@ -69,6 +73,13 @@ func _ready() -> void :
 	if _sync != null:
 		_cell = int(_sync.get_cell_size())
 		_sync.connect("blocks_changed", self, "_on_blocks_changed")
+	# Seed the "previous ink" with whatever ink is active now, so leaving comment drawing (via a
+	# tool pick or simulation) can always hand the highlight back to a real ink — even if COMMENT
+	# is the very first ink the user selects after the game loads.
+	if _editor != null:
+		var cur := String(_editor.get("indexed_color_id"))
+		if cur != "" and cur != COMMENT_ID:
+			_prev_ink_id = cur
 	E.follow_events(self, [
 		E.mi_mouse_input_on_board,
 		E.ui_context_change,
@@ -189,40 +200,43 @@ func _on_tip_tween_done() -> void :
 
 
 # --- selecting / deselecting the comment ink --------------------------------------------------
-# A comment-ink button was toggled (clicked in the palette, or hover-selected in the quick menu).
-# Pressed → the comment ink is now the selected ink (draw comments); unpressed → another ink in the
-# same ButtonGroup was picked (go back to drawing that ink).
-func _on_comment_button_toggled(pressed: bool) -> void :
-	if pressed:
+# The selected ink changed. This is the authoritative hook: the comment buttons announce the
+# "COMMENT" ink exactly like the native ink buttons announce theirs, so we enter comment drawing
+# when COMMENT becomes the active ink and leave the moment any other ink is picked. We also track
+# the last real ink here, to hand the highlight back when we leave for a reason other than an ink
+# pick (a tool pick, or simulation start).
+func _ev_ed_indexed_color_change(_mode: int, _args: Dictionary) -> void :
+	var id := String(_args[E.ed_indexed_color_change.p_indexed_color_id])
+	if id == COMMENT_ID:
 		_enter()
 	else:
-		# Another ink in the group was chosen — it is already active and highlighted, so just stop
-		# drawing comments and hand the tool back.
-		_leave(true, false)
+		_prev_ink_id = id
+		if _active:
+			# Another ink was picked — it's already active and highlighted, so just stop drawing
+			# comments and hand the editor tool back to what it was.
+			_leave(true, false)
 
 
 func _enter() -> void :
 	if _active:
 		return
 	if _editor != null and not bool(_editor.get("is_in_editor")):
-		# Can't place comments while simulating; bounce the buttons back off.
-		_sync_buttons()
+		# Can't place comments while simulating.
 		return
 	if _editor != null:
 		_prev_tool = int(_editor.get("editor_tool"))
-		_prev_ink_id = String(_editor.get("indexed_color_id"))
 	_active = true
 	_drag_place = false
 	_drag_erase = false
-	# Hold the normal drawing tools at NONE so they don't paint while we place comment blocks.
+	# Hold the normal drawing tools at NONE so nothing is painted while we place comment blocks
+	# ourselves (the editor's mouse handler has no branch for NONE, so the board is left untouched).
 	E.emit_signal("ed_tool_change_emitted", true, Editor.TOOL.NONE)
-	_sync_buttons()
 
 
 # Stop drawing comments. `restore_tool` puts the editor tool back to what it was before (used when
 # an ink was picked — inks don't change the tool, but we clobbered it to NONE on enter).
 # `repick_ink` re-selects the previously active ink so the ink grid isn't left with nothing
-# highlighted (used when the exit wasn't itself an ink pick).
+# highlighted (used when the exit wasn't itself an ink pick — a tool pick, or simulation start).
 func _leave(restore_tool: bool, repick_ink: bool) -> void :
 	if not _active:
 		return
@@ -234,17 +248,9 @@ func _leave(restore_tool: bool, repick_ink: bool) -> void :
 		if t < 0 or t == Editor.TOOL.NONE or t == Editor.TOOL.SIMULATOR:
 			t = Editor.TOOL.ARRAY
 		E.emit_signal("ed_tool_change_emitted", true, t)
-	_sync_buttons()
-	if repick_ink and _prev_ink_id != "":
+	if repick_ink and _prev_ink_id != "" and _prev_ink_id != COMMENT_ID:
 		E.echo(E.ed_indexed_color_pick, {
 			E.ed_indexed_color_pick.p_indexed_color_id: _prev_ink_id, })
-
-
-# Backup for a comment button that couldn't join the ink ButtonGroup: picking a real ink still
-# emits this, so leave comment drawing (the new ink is already active).
-func _ev_ed_indexed_color_change(_mode: int, _args: Dictionary) -> void :
-	if _active:
-		_leave(true, false)
 
 
 # A real tool was picked while drawing comments — keep the tool the user chose, but hand the ink
@@ -265,17 +271,6 @@ func _on_mi_mode_change(is_simulation_requested: bool) -> void :
 			b.disabled = is_simulation_requested
 	if is_simulation_requested and _active:
 		_leave(false, true)
-
-
-# Reflect the comment-active state on every comment button, without re-triggering their `toggled`
-# signals. Setting the palette button pressed also (via its shared ButtonGroup) deselects the ink.
-func _sync_buttons() -> void :
-	for b in _buttons:
-		if not is_instance_valid(b):
-			continue
-		b.set_block_signals(true)
-		b.pressed = _active
-		b.set_block_signals(false)
 
 
 # --- board input (place / edit / delete, click AND drag) --------------------------------------

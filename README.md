@@ -48,8 +48,9 @@ Pick the comment block like any ink, then draw on the board:
 Until a custom texture is added, blocks are drawn as a **warm translucent square with a small
 quote glyph** on the group's anchor, and the palette/quick-menu entry uses the game's text glyph
 tinted the comment colour. The block colour is the `BLOCK_FILL`/`BLOCK_EDGE` constants in
-`scripts/comment_block_overlay.gd` (and `COMMENT_COLOR` in `scripts/comment_ink_button.gd`), and
-the on-board block size is `CELL_SIZE` in `scripts/comment_block_sync.gd` — all easy to swap for a
+`scripts/comment_block_overlay.gd` (and the `COMMENT` ink's colour, registered in `C.PALETTE` by
+`mod_main.gd` with a `COMMENT_ACCENT` fallback in `scripts/comment_ink_button.gd`), and the
+on-board block size is `CELL_SIZE` in `scripts/comment_block_sync.gd` — all easy to swap for a
 real texture later.
 
 ## Install & run
