@@ -1,7 +1,7 @@
 {
 	"name": "VCBCommentBlock",
 	"namespace": "npopescu",
-	"version_number": "1.4.1",
+	"version_number": "1.5.0",
 	"website_url": "https://github.com/n-popescu/vcb-comment-block",
 	"description": "Adds an editor-only Comment Block to Virtual Circuit Board. Pick the comment block like any other ink — it's in the palette's Annotation row (between Filler and None) and in the Q/A quick menu — then draw comment blocks on the board (they are never simulated). Click a block to open a popup and type a comment; hover to read it as a tooltip that follows the mouse with a soft fade. Adjacent blocks merge into one bigger comment. Fully multiplayer-synced (the text streams live to the other player) and saved inside the .vcb file. Works during simulation too (view-only). Pure GDScript, loads at runtime, never replaces vcb.pck.",
 	"dependencies": [],
