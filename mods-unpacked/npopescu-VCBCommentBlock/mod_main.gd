@@ -90,11 +90,18 @@ func _process(_delta: float) -> void :
 # vanilla ink uses, so it never collides with the eyedropper or the mouse-over readout. The ink is
 # never painted onto the board — the overlay intercepts it (holding the tool at NONE) and places
 # editor-only comment blocks instead. Idempotent; returns true once handled.
+#
+# NOTE: we mutate through a LOCAL reference (`var pal = C.PALETTE; pal[...] = ...`), never
+# `C.PALETTE[...] = ...` directly. Dictionaries are references, so the local mutates the same dict
+# the singleton holds — but writing a nested key straight through the singleton makes GDScript 3.5
+# try to assign the whole dict back to the `const PALETTE` property, which errors at runtime with
+# "Invalid set index 'PALETTE'". The local-reference form avoids that write-back entirely.
 func _register_comment_ink() -> bool:
 	if typeof(C.PALETTE) != TYPE_DICTIONARY:
 		return true
 	if not C.PALETTE.has("COMMENT"):
-		C.PALETTE["COMMENT"] = {
+		var pal = C.PALETTE
+		pal["COMMENT"] = {
 			"ID": "COMMENT",
 			"EDITOR": "e1be83",
 			"ON": "e1be83",

@@ -143,11 +143,16 @@ mods use to add their own controls to the circuit-editor panel.
   missing). Enter/leave is driven by `ed_indexed_color_change`, so the "no ink highlighted after
   leaving comment" quirk is handled by `_leave(..., repick_ink=true)` on non-ink exits.
 - **`C.PALETTE["COMMENT"]` registration**: relies on GDScript 3.5 allowing mutation of a `const`
-  Dictionary's contents. It's a first-class ink but is never actually painted (the overlay holds
-  `TOOL.NONE`), so the engine never sees it. The colour (`e1be83`) is unique, so the eyedropper
-  (`tool_color_picker.gd`) and mouse-over readout (`mouse_over_label.gd`) never mis-match it, and
-  `STATSTYPE -1` keeps it out of `card_statistics.gd`. If a future engine build makes const dicts
-  read-only, the button falls back to `COMMENT_ACCENT` and still works.
+  Dictionary's contents — but it must be done through a **local reference**
+  (`var pal = C.PALETTE; pal["COMMENT"] = {…}`), NOT `C.PALETTE["COMMENT"] = {…}` directly. Writing
+  a nested key straight through the singleton makes GDScript 3.5 emit a *write-back* of the whole
+  dict to the `const PALETTE` property, which fails at runtime with `Invalid set index 'PALETTE'`
+  (spammed every frame until wiring finishes). Dictionaries are references, so the local mutates the
+  same dict the singleton holds. It's a first-class ink but is never actually painted (the overlay
+  holds `TOOL.NONE`), so the engine never sees it. The colour (`e1be83`) is unique, so the
+  eyedropper (`tool_color_picker.gd`) and mouse-over readout (`mouse_over_label.gd`) never mis-match
+  it, and `STATSTYPE -1` keeps it out of `card_statistics.gd`. If a future engine build makes const
+  dicts read-only, the button falls back to `COMMENT_ACCENT` and still works.
 - **MP**: both peers need this mod. Text streaming + place/remove + late-join sync are implemented;
   a same-instant place-and-type race on the exact same new group is not specially resolved (last
   writer wins, self-healing on the next edit / re-open).
