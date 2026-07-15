@@ -4,7 +4,11 @@ extends Node2D
 #
 # Added under Main/World (sibling of CursorBoard) so it shares the board's pixel coordinate space
 # and pans/zooms with the camera, exactly like the brush cursor. It:
-#   • draws every placed comment block (from CommentBlockSync);
+#   • marks every comment zone with the "T" text glyph at the zone's top-left cell (always shown,
+#     in every mode) so a comment reads as an annotation marker without hiding the board;
+#   • shows the warm-orange zone overlay ONLY when it's useful: for every zone while the comment
+#     ink is selected (so you can see where comment zones are while placing them), and — with any
+#     other tool/ink — only on the single zone the mouse is hovering, fading in/out;
 #   • shows a comment as a tooltip that FOLLOWS the mouse (down-right) with a stock-style fade
 #     in/out (a Tween on modulate, like the game's own UI) whenever the pointer is over a block —
 #     in edit mode AND during simulation (view-only);
@@ -14,15 +18,27 @@ extends Node2D
 #
 # The comment ink is a real member of the ink ButtonGroup (added to the palette's "Annotation" row
 # and to the Q/A quick menu). Selecting it deselects the current ink; picking any other ink (or a
-# tool, or starting a simulation) leaves comment drawing again. While the comment ink is active the
-# editor tool is held at NONE so the normal tools don't paint over the board — the mod places
-# comment blocks itself.
+# tool, or starting a simulation) leaves comment drawing again. While the comment ink is active we
+# hold the EDITOR's tool at NONE — but set directly on the editor, WITHOUT emitting a tool-change
+# event — so nothing is painted locally (the editor's board handler has no branch for NONE) yet the
+# editor toolbar / side panel stay exactly as they were (they only react to the tool-change event,
+# so they keep showing the previous tool while the comment ink is highlighted, like any other ink).
+# Remote multiplayer drawing is unaffected: it applies with the tool carried in its own payload.
 
 # Comment block look — a warm translucent note colour that no vanilla ink uses (kept in sync with
 # comment_ink_button.gd's COMMENT_ACCENT and the C.PALETTE["COMMENT"] entry mod_main registers).
 const BLOCK_FILL := Color(0.882, 0.745, 0.514, 0.45)
 const BLOCK_EDGE := Color(0.882, 0.745, 0.514, 0.95)
 const BLOCK_GLYPH := Color(0.15, 0.12, 0.07, 0.9)
+
+# The zone marker: the game's white "T" text glyph, tinted the comment accent so it reads as a
+# comment marker on the dark board. Drawn at each zone's top-left (anchor) cell, always visible.
+const T_ICON_PATH := "res://assets/icons/18px/text_symbol.png"
+const T_TINT := Color(0.882, 0.745, 0.514, 1.0)
+
+# Fade speed for the orange zone overlay (units of alpha per second → ~0.12 s to full, matching the
+# tooltip fade and the stock UI idiom).
+const FADE_SPEED := 8.0
 
 # The comment ink's "type id" — matches the entry mod_main registers in C.PALETTE and the
 # indexed_color_id the comment buttons announce. When this becomes the active ink, we draw comments.
@@ -38,6 +54,15 @@ var _active := false          # the comment ink is the selected ink → we're dr
 var _is_world_frame := false
 var _prev_tool := -1
 var _prev_ink_id := ""
+
+# Orange zone overlay state. `_all_alpha` fades in while the comment ink is active (all zones show);
+# `_hover_alpha` fades in for the single hovered zone the rest of the time. `_hover_cells` is the
+# cell set of the currently hovered zone (keyed like CommentBlockSync), `_hover_anchor` its anchor.
+var _tex_t: Texture = null
+var _all_alpha := 0.0
+var _hover_alpha := 0.0
+var _hover_anchor := Vector2(-1, -1)
+var _hover_cells := {}
 
 # Drag state (so a held drag paints / erases blocks like a trace).
 var _drag_place := false
@@ -70,6 +95,7 @@ func register_button(button) -> void :
 
 func _ready() -> void :
 	z_index = 20
+	_tex_t = _load_t_texture()
 	if _sync != null:
 		_cell = int(_sync.get_cell_size())
 		_sync.connect("blocks_changed", self, "_on_blocks_changed")
@@ -130,46 +156,105 @@ func _on_blocks_changed() -> void :
 	update()
 
 
+# Load the stock white "T" glyph used as the comment-zone marker (null if it's somehow missing —
+# _draw then falls back to the little quote glyph).
+func _load_t_texture() -> Texture:
+	if ResourceLoader.exists(T_ICON_PATH):
+		var t = load(T_ICON_PATH)
+		if t is Texture:
+			return t
+	return null
+
+
 func _draw() -> void :
 	if _sync == null:
 		return
 	var s := float(_cell)
-	for cell in _sync.get_all_cells():
-		var r := Rect2(cell.x * s, cell.y * s, s, s)
-		draw_rect(r, BLOCK_FILL, true)
-		draw_rect(r, BLOCK_EDGE, false, 1.0)
-	# A small "quote" glyph on each group's anchor cell so a block reads as a comment marker.
-	for cell in _sync.get_all_cells():
+	var cells = _sync.get_all_cells()
+	# Warm-orange zone overlay: every zone while the comment ink is active (_all_alpha), plus the
+	# hovered zone the rest of the time (_hover_alpha). Both fade, so cells only draw when visible.
+	for cell in cells:
+		var a := _all_alpha
+		if _hover_cells.has(_sync.key_for(cell)):
+			a = max(a, _hover_alpha)
+		if a > 0.003:
+			var r := Rect2(cell.x * s, cell.y * s, s, s)
+			var fill := BLOCK_FILL
+			fill.a *= a
+			var edge := BLOCK_EDGE
+			edge.a *= a
+			draw_rect(r, fill, true)
+			draw_rect(r, edge, false, 1.0)
+	# The "T" text marker at each zone's top-left (anchor) cell — always shown, so a comment reads
+	# as an annotation even with no orange overlay.
+	for cell in cells:
 		if _sync.anchor_of(cell) == cell:
 			var o := Vector2(cell.x * s, cell.y * s)
-			var d := s * 0.22
-			draw_rect(Rect2(o.x + s * 0.28, o.y + s * 0.3, d, d), BLOCK_GLYPH, true)
-			draw_rect(Rect2(o.x + s * 0.55, o.y + s * 0.3, d, d), BLOCK_GLYPH, true)
+			if _tex_t != null:
+				draw_texture_rect(_tex_t, Rect2(o.x, o.y, s, s), false, T_TINT)
+			else:
+				var d := s * 0.22
+				draw_rect(Rect2(o.x + s * 0.28, o.y + s * 0.3, d, d), BLOCK_GLYPH, true)
+				draw_rect(Rect2(o.x + s * 0.55, o.y + s * 0.3, d, d), BLOCK_GLYPH, true)
 
 
-# --- hover tooltip ----------------------------------------------------------------------------
-func _process(_delta: float) -> void :
+# --- hover tooltip + zone-overlay fade --------------------------------------------------------
+func _process(delta: float) -> void :
 	if _sync == null:
 		return
-	var want := false
+	# Which comment cell is the mouse over (if any)? Used for both the tooltip and, when NOT in
+	# comment-drawing mode, the hover zone highlight.
+	var hovered_cell = null
 	var text := ""
 	if _is_world_frame:
 		var board_pos := get_global_mouse_position()
 		if C.CIRCUIT.RECT.has_point(board_pos):
 			var cell: Vector2 = _sync.cell_of(board_pos)
 			if _sync.has_block(cell):
-				want = true
+				hovered_cell = cell
 				text = _sync.get_text(cell)
 				if text == "":
 					text = "(empty comment — click to add text)"
-	if want:
+	# Tooltip follows the mouse (offset lower-right so the pointer doesn't cover the text).
+	if hovered_cell != null:
 		_tip_label.text = text
-		# The PanelContainer auto-fits the label; follow the mouse, offset lower-right so the
-		# pointer doesn't cover the text.
 		_tip_panel.rect_position = get_viewport().get_mouse_position() + Vector2(18, 20)
 		_show_tooltip()
 	else:
 		_hide_tooltip()
+	# Hover zone highlight: only outside comment-drawing mode (in comment mode every zone already
+	# shows). Recompute the hovered zone's cells only when the hovered zone changes.
+	var new_anchor := Vector2(-1, -1)
+	if hovered_cell != null and not _active:
+		new_anchor = _sync.anchor_of(hovered_cell)
+	if new_anchor != _hover_anchor:
+		_hover_anchor = new_anchor
+		_hover_cells = {}
+		if new_anchor.x >= 0:
+			for c in _sync.group_cells(new_anchor):
+				_hover_cells[_sync.key_for(c)] = true
+		update()
+	# Fade the overlays toward their targets, redrawing while they move.
+	var all_target := 0.0
+	if _active:
+		all_target = 1.0
+	var hover_target := 0.0
+	if not _active and not _hover_cells.empty():
+		hover_target = 1.0
+	var prev_all := _all_alpha
+	var prev_hover := _hover_alpha
+	_all_alpha = _approach(_all_alpha, all_target, delta)
+	_hover_alpha = _approach(_hover_alpha, hover_target, delta)
+	if abs(_all_alpha - prev_all) > 0.0001 or abs(_hover_alpha - prev_hover) > 0.0001:
+		update()
+
+
+# Move `cur` toward `target` at FADE_SPEED per second, clamping so it never overshoots.
+func _approach(cur: float, target: float, delta: float) -> float:
+	var step := FADE_SPEED * delta
+	if cur < target:
+		return min(cur + step, target)
+	return max(cur - step, target)
 
 
 func _show_tooltip() -> void :
@@ -223,44 +308,57 @@ func _enter() -> void :
 	if _editor != null and not bool(_editor.get("is_in_editor")):
 		# Can't place comments while simulating.
 		return
-	if _editor != null:
-		_prev_tool = int(_editor.get("editor_tool"))
 	_active = true
 	_drag_place = false
 	_drag_erase = false
-	# Hold the normal drawing tools at NONE so nothing is painted while we place comment blocks
-	# ourselves (the editor's mouse handler has no branch for NONE, so the board is left untouched).
-	E.emit_signal("ed_tool_change_emitted", true, Editor.TOOL.NONE)
+	# Suppress the editor's LOCAL board painting while the comment ink is active, but do it WITHOUT
+	# emitting a tool-change event: we set editor_tool to NONE straight on the editor. The editor's
+	# board handler has no branch for NONE (so nothing is painted here), while circuit_editor.gd /
+	# footer.gd — which only listen to the tool-change EVENT — never hear about it and keep the
+	# toolbar/side panel showing the previous tool with the comment ink highlighted. Remote drawing
+	# in multiplayer still applies: it uses the editor tool carried in its own event payload.
+	if _editor != null:
+		_prev_tool = int(_editor.get("editor_tool"))
+		_editor.set("editor_tool", Editor.TOOL.NONE)
 
 
-# Stop drawing comments. `restore_tool` puts the editor tool back to what it was before (used when
-# an ink was picked — inks don't change the tool, but we clobbered it to NONE on enter).
-# `repick_ink` re-selects the previously active ink so the ink grid isn't left with nothing
-# highlighted (used when the exit wasn't itself an ink pick — a tool pick, or simulation start).
+# Stop drawing comments. `restore_tool` puts the editor tool back to what it was before entering
+# (used for every exit EXCEPT a tool pick, where the picked tool must stay). `repick_ink`
+# re-selects the previously active ink so the ink grid isn't left with nothing highlighted (used
+# when the exit wasn't itself an ink pick — a tool pick, or simulation start).
 func _leave(restore_tool: bool, repick_ink: bool) -> void :
 	if not _active:
 		return
 	_active = false
 	_drag_place = false
 	_drag_erase = false
-	if restore_tool:
+	if _editor != null:
 		var t := _prev_tool
-		if t < 0 or t == Editor.TOOL.NONE or t == Editor.TOOL.SIMULATOR:
+		if t == Editor.TOOL.NONE or t == Editor.TOOL.SIMULATOR or t < 0:
 			t = Editor.TOOL.ARRAY
-		E.emit_signal("ed_tool_change_emitted", true, t)
+		# While the comment ink was active the editor tool was held at NONE, so anything that copied
+		# editor_tool into last_tool (picking a tool, or starting a simulation) captured NONE.
+		# Restore last_tool to the real previous tool so leaving a simulation — which re-applies
+		# last_tool — doesn't blank the toolbar.
+		_editor.set("last_tool", t)
+		if restore_tool:
+			_editor.set("editor_tool", t)
 	if repick_ink and _prev_ink_id != "" and _prev_ink_id != COMMENT_ID:
 		E.echo(E.ed_indexed_color_pick, {
 			E.ed_indexed_color_pick.p_indexed_color_id: _prev_ink_id, })
 
 
 # A real tool was picked while drawing comments — keep the tool the user chose, but hand the ink
-# highlight back to the previous ink.
+# highlight back to the previous ink. NONE is our own pin (never emitted, but ignore defensively);
+# SIMULATOR is the sim's own tool switch and is handled by `_on_mi_mode_change` (which restores the
+# editor tool) — reacting to it here would leave with the wrong restore semantics and blank the
+# toolbar after the sim.
 func _on_tool_change(is_request: bool, new_tool: int) -> void :
 	if is_request:
 		return
 	if not _active:
 		return
-	if new_tool == Editor.TOOL.NONE:
+	if new_tool == Editor.TOOL.NONE or new_tool == Editor.TOOL.SIMULATOR:
 		return
 	_leave(false, true)
 
@@ -269,8 +367,10 @@ func _on_mi_mode_change(is_simulation_requested: bool) -> void :
 	for b in _buttons:
 		if is_instance_valid(b):
 			b.disabled = is_simulation_requested
+	# Starting a simulation leaves comment mode: restore the editor tool (so drawing works again
+	# after the sim) and re-pick the previous ink.
 	if is_simulation_requested and _active:
-		_leave(false, true)
+		_leave(true, true)
 
 
 # --- board input (place / edit / delete, click AND drag) --------------------------------------

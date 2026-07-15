@@ -7,10 +7,16 @@ adds an **editor-only comment block** — a block you place on the board to anno
 - **It's just another ink.** The comment block sits in the palette's **Annotation** row (between
   Filler and None) and in the **Q/A quick menu** (between Filler and None). Pick it like any ink
   and **draw** comment blocks with the mouse — left-click or drag to place, right-click or drag to
-  erase. It's purely an editor decoration — **never sent to the simulation engine**, so it doesn't
-  affect the circuit at all.
+  erase. Selecting it **keeps the whole editor toolbar in place** (it's an ink, not a mode), so the
+  layer/ink/tool panels don't disappear. It's purely an editor decoration — **never sent to the
+  simulation engine**, so it doesn't affect the circuit at all.
+- **Unobtrusive markers.** Each comment zone is marked with a small **"T"** glyph at its top-left,
+  always visible so you can see a comment is there without it covering the board. The **warm-orange
+  zone overlay** only appears when it's useful: on **every** zone while the comment ink is selected
+  (so you can see where to place/extend comments), and — with any other tool — only on the zone
+  you're **hovering**, fading gently in and out.
 - **Hover to read.** Hovering a block shows its comment as a small tooltip that **follows the
-  mouse** (to the lower-right) with a soft fade in/out.
+  mouse** (to the lower-right) with a soft fade in/out, and highlights that zone in orange.
 - **Click to edit.** With the comment ink selected, clicking an existing block opens a popup (the
   game's dialog style) with a text zone. **Enter** saves it (**Shift+Enter** for a new line);
   click the block again anytime to change it.
@@ -45,13 +51,17 @@ Pick the comment block like any ink, then draw on the board:
 
 ## Default look
 
-Until a custom texture is added, blocks are drawn as a **warm translucent square with a small
-quote glyph** on the group's anchor, and the palette/quick-menu entry uses the game's text glyph
-tinted the comment colour. The block colour is the `BLOCK_FILL`/`BLOCK_EDGE` constants in
-`scripts/comment_block_overlay.gd` (and the `COMMENT` ink's colour, registered in `C.PALETTE` by
-`mod_main.gd` with a `COMMENT_ACCENT` fallback in `scripts/comment_ink_button.gd`), and the
-on-board block size is `CELL_SIZE` in `scripts/comment_block_sync.gd` — all easy to swap for a
-real texture later.
+A comment zone always shows a small **"T"** marker (the game's `text_symbol` glyph, tinted the
+comment colour) at its top-left cell. The **warm-orange fill** is drawn only while the comment ink
+is selected (all zones) or, with any other tool, on the single zone under the mouse (fading in/out)
+— so comments stay out of the way while you work. The palette/quick-menu entry uses the same text
+glyph tinted the comment colour.
+
+The look lives in `scripts/comment_block_overlay.gd`: the fill/edge in `BLOCK_FILL`/`BLOCK_EDGE`,
+the marker glyph + tint in `T_ICON_PATH`/`T_TINT`, and the fade timing in `FADE_SPEED` (the
+`COMMENT` ink's colour is registered in `C.PALETTE` by `mod_main.gd`, with a `COMMENT_ACCENT`
+fallback in `scripts/comment_ink_button.gd`). The on-board block size is `CELL_SIZE` in
+`scripts/comment_block_sync.gd` — all easy to swap for a fuller texture later.
 
 ## Install & run
 

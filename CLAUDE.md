@@ -68,8 +68,18 @@ mods use to add their own controls to the circuit-editor panel.
 
 ### 2.2 Overlay (`comment_block_overlay.gd`, a `Node2D` under `Main/World`)
 - Sibling of `CursorBoard`, so it shares board-pixel space and pans/zooms with the camera (the
-  cursor being visible on top of the board proves World `Node2D` children draw above it). `_draw`
-  fills each cell + a quote glyph on anchors.
+  cursor being visible on top of the board proves World `Node2D` children draw above it).
+- **Drawing (`_draw`)**: two layers. (1) A warm-orange fill+edge per cell, drawn only where it's
+  useful and **faded**: every cell at `_all_alpha` (→1 while the comment ink is active, so you can
+  see all zones while placing), plus the hovered zone's cells at `_hover_alpha` (→1 while hovering a
+  zone with any *other* tool). Cells with ~0 alpha are skipped. (2) The **"T" marker** (the stock
+  `text_symbol.png` glyph, `T_ICON_PATH`, tinted `T_TINT`) drawn at each group's **anchor** (its
+  top-left cell), **always** — so a comment reads as an annotation without the orange covering the
+  board. Falls back to the old quote glyph if the texture is missing. `_process` eases `_all_alpha`
+  / `_hover_alpha` toward their targets (`_approach`, `FADE_SPEED` ≈ 0.12 s) and `update()`s while
+  they move (Node2D otherwise retains the last frame, so a steady state costs no redraws). The
+  hovered zone's cell set (`_hover_cells`, keyed like the sync) is recomputed only when the hovered
+  **anchor** changes.
 - **Hover tooltip**: polled in `_process` from `get_global_mouse_position()` (board coords) gated
   by `_is_world_frame` (from `E.ui_context_change`, `C.CONTEXT.WORLD_FRAME`). The tooltip is a
   `Label` in a `PanelContainer` on its own `CanvasLayer` (screen space), positioned at
@@ -83,12 +93,21 @@ mods use to add their own controls to the circuit-editor panel.
   comment buttons (palette + quick menu) stay in sync automatically the way native inks do — each
   responds to `ed_indexed_color_pick("COMMENT")` by pressing itself, and each bar's `ButtonGroup`
   unpresses the rest. They still `register_button` with the overlay, but only so it can disable them
-  during simulation. On `_enter` the overlay remembers the previous tool and **holds the editor tool
-  at `NONE`** (`ed_tool_change_emitted`) so the normal tools don't paint while we place comment
-  blocks (the editor's `_ev_mi_mouse_input_on_board` has no branch for `NONE`). `_leave(restore_tool,
-  repick_ink)` covers every exit: picking another **ink** restores the previous tool (the new ink is
-  already active); picking a real **tool** keeps that tool but re-picks the previous ink so the grid
-  isn't left with nothing highlighted; **simulation** start re-picks the ink and disables the
+  during simulation. On `_enter` the overlay remembers the previous tool and holds the editor tool
+  at `NONE` **by writing `editor.editor_tool` directly, WITHOUT emitting `ed_tool_change_emitted`**.
+  That suppresses only *local* painting (the editor's `_ev_mi_mouse_input_on_board` has no branch for
+  `NONE`) while `circuit_editor.gd` / `footer.gd` — which react to the tool-change **event**, not the
+  var — never hear about it, so **the toolbar/side panel stay put** showing the previous tool with
+  the comment ink highlighted, like any ink. (The old code emitted the event, which blanked the
+  toolbar — that was the bug.) Multiplayer remote drawing is unaffected: the MP `editor.gd`
+  extension applies remote strokes with the tool carried in the event **payload**, not the local
+  `editor_tool`. `_leave(restore_tool, repick_ink)` covers every exit and always **repairs
+  `editor.last_tool`** to the real previous tool (while the tool was pinned to `NONE`, entering a
+  sim or picking a tool copied `NONE` into `last_tool`; leaving a sim re-applies `last_tool`, so an
+  un-repaired `NONE` would blank the toolbar after the sim). It restores `editor.editor_tool` to the
+  previous tool for every exit **except** a tool pick (there the picked tool must stay). Picking
+  another **ink** → `_leave(true, false)`; picking a real **tool** → `_leave(false, true)` (keep the
+  tool, re-pick the previous ink); **simulation** start → `_leave(true, true)` + disables the
   buttons. `_prev_ink_id` is seeded from the editor's current ink in `_ready` so the first pick can
   always be handed back.
 - **Board draw/erase** (via `E.mi_mouse_input_on_board`, only while the comment ink is active + edit
@@ -124,16 +143,24 @@ mods use to add their own controls to the circuit-editor panel.
 
 - **Overlay z-order**: assumed World `Node2D` children render above the board (as the brush cursor
   does). If comment blocks render *behind* the board, adjust the overlay's `z_index`/parent.
-- **`Editor.TOOL.NONE` while the comment ink is active**: chosen because the editor's mouse handler
-  has no branch for it (so nothing paints) — this is what lets the mod place blocks without the
-  normal tools drawing. Verify no other path treats `NONE` specially. (We can't cleanly extend
-  `editor.gd` here: the Multiplayer mod reproduces `_ev_mi_mouse_input_on_board` verbatim, so
-  chaining a second override is fragile — hence the `TOOL.NONE` approach instead.)
-- **Default look is a colour + glyph**, not a texture. The palette/quick-menu button uses the
-  game's white `text_symbol.png` glyph tinted by a `FluxModTextureButton` accent read from the
-  registered `C.PALETTE["COMMENT"].ON` (falling back to `COMMENT_ACCENT` if the entry is somehow
-  missing), matching native ink buttons. When a real texture exists, set it as `comment_ink_button`'s
-  `texture_normal` and swap the overlay `_draw` rect for a `draw_texture_rect`; tune `CELL_SIZE`.
+- **`Editor.TOOL.NONE` while the comment ink is active** (set on `editor.editor_tool` **directly**,
+  not via `ed_tool_change_emitted`): chosen because the editor's mouse handler has no branch for it
+  (so nothing paints locally) — this lets the mod place blocks without the normal tools drawing,
+  while the toolbar (which only reacts to the tool-change *event*) stays put. Verify no other path
+  treats `NONE` specially, and that `_leave` correctly restores `editor_tool`/`last_tool` (see
+  §2.2). It's MP-safe because the MP `editor.gd` extension applies **remote** strokes with the tool
+  from the event payload, not `editor_tool`; the direct write only gates *local* painting. (We
+  still can't cleanly extend `editor.gd` here: the Multiplayer mod reproduces
+  `_ev_mi_mouse_input_on_board` verbatim, so chaining a second override is fragile — hence pinning
+  the tool var instead of adding a paint guard.)
+- **Look is a marker + a hover/active fill**, not a full texture. On the board, each zone shows the
+  stock white `text_symbol.png` "T" glyph (tinted `T_TINT`) at its anchor cell always, plus the warm
+  fill (`BLOCK_FILL`/`BLOCK_EDGE`) only while the comment ink is active (all zones) or on the hovered
+  zone (faded, `FADE_SPEED`). The palette/quick-menu button uses the same white `text_symbol.png`
+  glyph tinted by a `FluxModTextureButton` accent read from the registered `C.PALETTE["COMMENT"].ON`
+  (falling back to `COMMENT_ACCENT` if the entry is somehow missing), matching native ink buttons.
+  For a fuller custom texture, set it as `comment_ink_button`'s `texture_normal` and swap the overlay
+  `_draw` marker/fill; tune `CELL_SIZE`/`T_TINT`.
 - **Palette/quick-menu placement**: the comment ink is inserted into the palette's `HBoxContainer6`
   ("Annotation" row) between `BtnFiller`/`BtnNone`, and into the quick menu's `HFlowContainer2`
   between `BtnFiller`/`BtnNone`, joined to each bar's `ButtonGroup` (read off `BtnNone` / the menu's
@@ -204,11 +231,16 @@ mods use to add their own controls to the circuit-editor panel.
 - Open PRs against `main`; squash-merge. **One PR per change** (no duplicate branches).
 - Test recipe (in-engine): enable modding + drop the zip, launch. Confirm the **comment** ink
   appears in the palette's Annotation row (between Filler and None) AND in the Q/A quick menu
-  (between Filler and None). Select it; **left-drag** to paint a few blocks; **left-click** an
-  existing block → type → Enter; hover to read (tooltip follows the mouse + fades). Place blocks
-  adjacent → confirm they share one comment; **right-click / right-drag** to erase. Pick another
-  ink → comment deselects and normal drawing resumes (an ink stays highlighted). Save the `.vcb`,
-  reopen → comments persist; a comment-free board saves clean. Start a simulation → hover still
-  shows text, drawing is disabled. With the Multiplayer mod: on host + joiner, draw/type on one →
-  the other sees blocks appear and text stream in; a late joiner receives existing comments.
+  (between Filler and None). Select it — **the editor toolbar/side panel must NOT disappear** (it
+  keeps showing the previous tool, with the comment ink highlighted) — and **every** comment zone
+  shows the orange fill. **left-drag** to paint a few blocks; **left-click** an existing block →
+  type → Enter; hover to read (tooltip follows the mouse + fades). Place blocks adjacent → confirm
+  they share one comment; **right-click / right-drag** to erase. Pick another ink or tool → comment
+  deselects, the orange fill disappears, and **each zone shows just the "T" marker**; hovering a
+  zone fades its orange overlay in/out. Save the `.vcb`, reopen → comments persist; a comment-free
+  board saves clean. Start a simulation → hover still shows text, drawing is disabled; **stop the
+  sim → the toolbar comes back** (not blank). With the Multiplayer mod: on host + joiner, draw/type
+  on one → the other sees blocks appear and text stream in; while one player has the comment ink
+  selected, the **other's normal trace drawing still applies** on both boards; a late joiner
+  receives existing comments.
 ```
