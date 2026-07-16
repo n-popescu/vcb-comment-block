@@ -25,7 +25,7 @@ stored in the mod's own data and persisted in the `.vcb`'s `modded` field.
 ## 2. Architecture (4 pieces + 1 extension)
 
 ```
-mod_main.gd                     waits for Main, registers the COMMENT ink, builds the nodes below + installs the extension
+mod_main.gd                     waits for Main, registers the COMMENT ink, builds the nodes below + the sim "Show comments" checkbox + installs the extension
 scripts/comment_block_sync.gd   /root/CommentBlockSync : the data model + adjacency + MP RPCs + save API
 scripts/comment_block_overlay.gd  Main/World/CommentBlockOverlay : draws blocks, hover tooltip, board draw/erase routing
 scripts/comment_ink_button.gd   the palette + quick-menu "comment" ink button — a clone of the game's own button_ink.gd (indexed_color_id="COMMENT")
@@ -72,7 +72,17 @@ mods use to add their own controls to the circuit-editor panel.
   its cells in that snapshot. So a comment follows its group as it grows/shrinks/re-anchors and is
   **only lost when the group's LAST block is removed** — deleting the top-left/anchor cell no longer
   drops it. Splitting keeps the text on each surviving piece. `set_text` writes at the anchor.
-  `remove_group` clears a whole group.
+  `remove_group` clears a whole group. **Perf:** the pre-mutation snapshot is taken in ONE
+  `_compute_groups()` pass (`_snapshot_cell_data`) instead of three — so a place/remove now runs the
+  O(cells) connected-components flood fill **twice** (snapshot + reconcile), not four times; on a
+  drag that placed many cells that 4× was a big chunk of the "lag while drawing".
+- **Moving a whole group** (`can_move_group(member, delta)` / `move_group(member, delta, broadcast)`):
+  shift every cell of a group by `delta` grid cells, carrying its text/author/name to the new
+  anchor (the group moves as a UNIT — it never merges on a move). `can_move_group` rejects a shift
+  that would leave the board, **overlap** any cell of a different group, or become **4-adjacent to
+  another group when either side is a written (non-empty) comment** — so a move can't drop a comment
+  on top of, or fuse it with, an already-edited one (the overlay reverts to the old spot). Used by
+  the selection-tool drag in the overlay (§2.2); mirrored in MP by `_rpc_move_group`.
 - **Two written comments never fuse or touch.** `place()` refuses any block that would connect two
   or more DISTINCT non-empty groups (`_would_bridge_nonempty`), so you can only grow/merge with
   EMPTY blocks — an empty new comment may still merge into ONE existing written comment (which is
@@ -91,24 +101,43 @@ mods use to add their own controls to the circuit-editor panel.
 ### 2.2 Overlay (`comment_block_overlay.gd`, a `Node2D` under `Main/World`)
 - Sibling of `CursorBoard`, so it shares board-pixel space and pans/zooms with the camera (the
   cursor being visible on top of the board proves World `Node2D` children draw above it).
-- **Drawing (`_draw`)**: two layers. (1) A warm-orange fill+edge per cell, drawn only where it's
-  useful and **faded**: every cell at `_all_alpha` (→1 while the comment ink is active, so you can
-  see all zones while placing), plus the hovered zone's cells at `_hover_alpha` (→1 while hovering a
-  zone with any *other* tool). Cells with ~0 alpha are skipped. (2) The **"T" marker** (the stock
-  `text_symbol.png` glyph, `T_ICON_PATH`, tinted `T_TINT`) drawn **centered on each group at a FIXED
-  size** (`_cell * 2 * 0.8`, i.e. roughly an 8×8 tile) — it must **not** scale with the zone/group
-  size, so a big comment still shows the same small marker. Falls back to the old quote glyph if the
-  texture is missing. (3) In a live session, each **remote peer's comment placement preview** (their
-  footprint, from the synced presence in §2.4) is drawn in that peer's multiplayer colour, so you
-  see their comment-mode hover, not just the default cursor. `_process` eases `_all_alpha` /
-  `_hover_alpha` toward their targets (`_approach`, `FADE_SPEED` ≈ 0.12 s) and `update()`s while
-  they move.
-- **Hover tooltip**: polled in `_process` from `get_global_mouse_position()` (board coords) gated
-  by `_is_world_frame` (from `E.ui_context_change`, `C.CONTEXT.WORLD_FRAME`). The tooltip is a
-  `Label` in a `PanelContainer` on its own `CanvasLayer` (screen space), positioned at
+- **When comments are shown (`_reveal`, computed each frame in `_update_reveal`)**: `0` = nothing,
+  `1` = every zone (fill + centered "T"), `2` = only the hovered zone. **Edit** mode → `1` while the
+  comment ink is active OR the selection tool is active (or a zone-move is in progress) so you can
+  see/grab zones; `0` with a drawing tool (array/pencil/eraser/bucket) **so you can draw circuit
+  UNDER a comment** without it in the way. **Simulation** → `2` only when the **"Show comments"**
+  checkbox is on (see §2.6), else `0`. This is what hides comments while drawing, and the
+  `ed_indexed_color_change` / `ed_tool_change_emitted` events + `is_in_editor` drive it live.
+- **Drawing (`_draw`)**: (1) a warm-orange fill+edge per cell, faded by `_all_alpha` (→1 when
+  `_reveal == 1`) and `_hover_alpha` (the hovered zone, `_reveal != 0`); (2) the **"T" marker** (the
+  stock `text_symbol.png` glyph, `T_ICON_PATH`, tinted `T_TINT`) **centered on each group at a FIXED
+  size** (`_cell * 2 * 0.8`) — never scaled to the zone; drawn for every zone at `_reveal == 1`, or
+  only the hovered zone at `_reveal == 2`; (3) remote peers' placement previews (`_reveal == 1`, MP
+  §2.4); (4) the zone-move **ghost** (below). **Perf / the "recompute T every placed block" lag:**
+  group geometry (each group's cells, colour, and centered T rect) is **cached in `_geom`** and
+  rebuilt (`_rebuild_geom`, one `get_groups()` pass) only on discrete changes — NOT during a local
+  place/erase drag. While `_drag_place`/`_drag_erase` is set, `_draw` takes a **cheap path** (every
+  current cell as a plain fill + the cached pre-drag T markers, no per-cell flood fill), and the
+  geometry/T positions are recomputed **once on release** (`p_is_just_released` sets `_geom_dirty`).
+  `_process` eases `_all_alpha`/`_hover_alpha` toward their `_reveal`-derived targets.
+- **Hover tooltip**: polled in `_process` from `get_global_mouse_position()` (board coords), gated
+  by `_is_world_frame` (from `E.ui_context_change`, `C.CONTEXT.WORLD_FRAME`) **and `_reveal != 0`**
+  (so it's silent while a drawing tool is active, and in sim only when "Show comments" is on). The
+  tooltip is a `Label` in a `PanelContainer` on its own `CanvasLayer` (screen space), positioned at
   `get_viewport().get_mouse_position() + (18,20)` each frame, faded with a `Tween` on `modulate`
-  (0.12 s `TRANS_SINE`) — the same fade idiom the stock UI uses (`notes.gd`,
-  `flux_btn_checkbox.gd`). Works in edit AND sim.
+  (0.12 s `TRANS_SINE`) — the same fade idiom the stock UI uses (`notes.gd`, `flux_btn_checkbox.gd`).
+- **Moving a zone (selection tool)**: to preempt the game's selection box we watch raw input in
+  `_input` (which runs *before* `cursor_board._unhandled_input` echoes the board event): a **left
+  press on a comment cell while the SELECTION tool is active** starts a move — it pins
+  `editor.editor_tool = NONE` (so the editor's own handler, on the following echo, sees NONE and
+  never starts a selection) WITHOUT emitting a tool-change event (toolbar stays put), and records the
+  grabbed group. The drag itself is tracked in `_ev_mi_mouse_input_on_board` (`_handle_move_input`):
+  the group **stays at its old position** and a `_draw_move_ghost` shows the tentative destination
+  (green = `can_move_group` ok, red = blocked). On **release** `_finish_move` calls `move_group`
+  (§2.1) — which commits only if valid, else the group stays — then restores `editor_tool` to
+  SELECTION. A right-click, a real tool change (`_on_tool_change`) or sim start (`_on_mi_mode_change`)
+  abandons the move (the interrupting event already set the tool, so `_abandon_move` does NOT restore
+  it). Mirrored to MP inside `move_group` (`_rpc_move_group`).
 - **Selecting the comment ink** (drawing comments): because the comment buttons are real inks, the
   overlay keys its state off the **authoritative `ed_indexed_color_change` event** (not off the
   buttons' `toggled` — that turned out fragile). `_ev_ed_indexed_color_change`: id `== "COMMENT"` →
@@ -157,8 +186,10 @@ mods use to add their own controls to the circuit-editor panel.
 - `CommentBlockSync` rides the Multiplayer mod's ENet peer (never opens its own). `_live_session()`
   = MP autoload present + `network_peer` + `is_connected` + `is_game_started`, all via
   `get_node_or_null`/`Object.get` so it works with MP absent.
-- `remote func _rpc_place/_rpc_remove/_rpc_set_text` mirror edits (guarded by `_applying_remote`).
-  Text is streamed live; `_rpc_set_text` also carries the author id **and name**. `_on_mp_player_connected`
+- `remote func _rpc_place/_rpc_remove/_rpc_move_group/_rpc_set_text` mirror edits (guarded by
+  `_applying_remote`). Text is streamed live; `_rpc_set_text` also carries the author id **and name**.
+  A zone **move** rides `_rpc_move_group(old_anchor, delta)` (both peers share identical block state,
+  so the receiver's `can_move_group` re-check is deterministic). `_on_mp_player_connected`
   (host) pushes the whole state to a late joiner via `rpc_id(id, "_rpc_sync_all", …)`. Each peer also
   broadcasts a light **comment-mode presence** — `broadcast_presence(active, brush, cell)` →
   `_rpc_presence` → `_remote_presence[peer]` + `presence_changed` — so the overlay can draw that
@@ -173,6 +204,17 @@ mods use to add their own controls to the circuit-editor panel.
   after the base loads, and broadcasts the loaded state to peers in a live session. Both this mod and
   the Board Size mod extend `file_system.gd`; they coexist because each only touches its own key and
   calls the base.
+
+### 2.6 Sim-mode "Show comments" checkbox
+- `mod_main._wire_sim_checkbox` builds the game's own `flux_btn_checkbox.tscn` (same widget the VCB
+  Improvements mod + the array "Multicolored Traces" option use) named `BtnShowComments`, into the
+  **Simulation** side panel **above** the Toggle/Press bar (`SimulatorBar2`, above its "Mouse
+  Interaction Mode" label), and hands it to the overlay via `overlay.set_show_checkbox`. That panel
+  is shown only during simulation, so the toggle is sim-only and keeps its state across sim
+  stop/restart (its node is never rebuilt). The overlay reads `public_get_pressed()` in
+  `_update_reveal`; **off (default) hides all comment visuals in sim, on reveals a comment + zone on
+  hover** (`_reveal == 2`). Wired in the same retry loop as the palette/quick-menu (a third
+  `_simcheck_wired` gate).
 
 ## 3. Known limitations / assumptions to verify in-engine
 
@@ -245,11 +287,15 @@ mods use to add their own controls to the circuit-editor panel.
 - **Compile-check with a real Godot 3.5.1, not just gdtoolkit.** gdtoolkit misses identifier
   resolution and `:=` inference errors. Definitive local check (this is how the v1.3.1 bug was
   found): download `Godot_v3.5.1-stable_linux_headless.64`, make a throwaway project with stub
-  autoloads (`C`, `E`) and stub `class_name`s (`Editor`, `ModLoaderLog`, `ModLoaderMod`) providing
-  the symbols the mod uses, then in a main scene `_ready` do `load("res://…/script.gd").can_instance()`
-  for each mod script — `can_instance()` is `true` only if the script fully compiled. Autoloads are
-  only registered when the project actually runs (not with `--check-only --script`), so run the
-  project headless rather than checking single scripts in isolation.
+  autoloads (`C`, `E`, and an autoload named `Editor` carrying `enum TOOL`/`enum LAYER`; plus
+  `ModLoaderLog`/`ModLoaderMod`) providing the symbols the mod uses, then in a main scene `_ready` do
+  `load("res://…/script.gd").can_instance()` for each mod script — `can_instance()` is `true` only if
+  the script fully compiled. Autoloads are only registered when the project actually runs (not with
+  `--check-only --script`), so run the project headless rather than checking single scripts in
+  isolation. This ALSO catches **reserved words used as local names**, which gdtoolkit's Godot-4
+  grammar misses — e.g. `tool` (script keyword) and `tan` (built-in function) are both illegal
+  variable names in 3.5 and fail with "Expected an identifier"/"Unexpected token"; use `cur_tool`,
+  `tan_col`, etc.
 - **Tabs, not spaces**, in every `.gd`. Quick check: `grep -nP '^\t* +\S' <file>` must be empty
   for lines you add.
 - `C` and `E` are the game's autoloads (always present); `Editor` is a `class_name`. `MP` /
@@ -270,12 +316,18 @@ mods use to add their own controls to the circuit-editor panel.
   keeps showing the previous tool, with the comment ink highlighted) — and **every** comment zone
   shows the orange fill. **left-drag** to paint a few blocks; **left-click** an existing block →
   type → Enter; hover to read (tooltip follows the mouse + fades). Place blocks adjacent → confirm
-  they share one comment; **right-click / right-drag** to erase. Pick another ink or tool → comment
-  deselects, the orange fill disappears, and **each zone shows just the "T" marker**; hovering a
-  zone fades its orange overlay in/out. Save the `.vcb`, reopen → comments persist; a comment-free
-  board saves clean. Start a simulation → hover still shows text, drawing is disabled; **stop the
-  sim → the toolbar comes back** (not blank). With the Multiplayer mod: on host + joiner, draw/type
-  on one → the other sees blocks appear and text stream in; while one player has the comment ink
+  they share one comment; **right-click / right-drag** to erase. **Perf:** drag a long comment on a
+  board that already has many comments → drawing stays smooth and the "T" markers settle on release
+  (no per-block stutter). **Hide-while-drawing:** pick a drawing tool (array/pencil/eraser/bucket) →
+  the zones + T markers + tooltip disappear and you can draw circuit under a comment; pick the
+  comment ink again → they reappear. **Move:** pick the **selection tool** → zones show; click-drag
+  a zone → it stays put with a green ghost following, and jumps on release; drag it over/against
+  another *edited* comment → the ghost turns red and on release it snaps back. Save the `.vcb`,
+  reopen → comments (and moves) persist; a comment-free board saves clean. Start a simulation → by
+  default no comments show; tick **Show comments** (above Toggle/Press in the Simulation panel) →
+  hovering a comment reveals its zone + text; untick → hidden again; **stop the sim → the toolbar
+  comes back** (not blank). With the Multiplayer mod: on host + joiner, draw/type/**move** on one →
+  the other sees blocks appear, text stream in, and zones move; while one player has the comment ink
   selected, the **other's normal trace drawing still applies** on both boards; a late joiner
   receives existing comments.
 ```

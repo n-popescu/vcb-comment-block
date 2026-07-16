@@ -1,3 +1,34 @@
+# HANDOFF — Comment Block: perf + move + hide-while-drawing + sim toggle (v1.8.0)
+
+Latest unit of work in **this repo** (branch `claude/comment-perf-move-sim-…`, **v1.7.0 → v1.8.0**).
+GDScript on the original VCB engine (Godot 3.5.1). Compiled clean with a real
+`Godot_v3.5.1-stable_linux_headless.64` (`can_instance()` true for all three changed scripts) but
+**UNVERIFIED in actual gameplay** — in-game testing still required. Four changes:
+
+1. **Drawing lag fixed.** `comment_block_overlay.gd` now **caches group geometry** (`_geom`,
+   `_rebuild_geom`) and does NOT recompute each group's bounds / centered "T" position on every
+   placed cell. During a local place/erase drag `_draw` takes a cheap path (raw cell fills + cached
+   T markers); the geometry/T settle **once on release**. `comment_block_sync.gd` also folds its
+   three pre-mutation snapshots into ONE `_compute_groups()` pass (`_snapshot_cell_data`), so a
+   place/remove runs the flood fill 2× instead of 4×.
+2. **Move a zone with the selection tool.** New `can_move_group` / `move_group` (+ `_rpc_move_group`)
+   in the sync. The overlay starts a move in `_input` (before `cursor_board` echoes) by pinning
+   `editor.editor_tool = NONE` so the selection box never starts; the group stays put with a
+   green/red ghost until release, then commits only if valid (no overlap / no touching another
+   edited comment / on-board), else snaps back. Restores SELECTION on release; abandons on
+   tool/sim change.
+3. **Hide comments while drawing.** New `_reveal` model (`_update_reveal`): edit mode shows zones
+   only with the comment ink OR the selection tool, and **nothing** with a drawing tool (draw under
+   comments). Tooltip + T + fills all follow `_reveal`.
+4. **Sim "Show comments" checkbox.** `mod_main._wire_sim_checkbox` builds the game's
+   `flux_btn_checkbox.tscn` above the Toggle/Press bar in the Simulation panel; overlay reads it in
+   `_update_reveal` (off by default → no comments in sim; on → reveal on hover).
+
+Full detail in `CLAUDE.md` §2.1/§2.2/§2.4/§2.6. Reserved-word gotcha hit + documented: `tool` and
+`tan` can't be local variable names in 3.5 (renamed to `cur_tool` / `tan_col`).
+
+---
+
 # HANDOFF — session 2026‑07‑16 (MP roster + Comment Block fixes)
 
 Context for the next AI agent. Two units of work landed this session: a **Multiplayer side‑panel

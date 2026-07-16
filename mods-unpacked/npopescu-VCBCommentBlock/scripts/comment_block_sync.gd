@@ -37,6 +37,7 @@ extends Node
 # with the Multiplayer mod absent.
 
 const CELL_SIZE := 4
+const _NEIGHBORS := [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1)]
 
 var _cells := {}
 var _texts := {}
@@ -259,11 +260,9 @@ func place(cell: Vector2, broadcast: bool) -> void :
 	# from fusing or touching). Applied on both peers identically, so boards stay consistent.
 	if _would_bridge_nonempty(cell):
 		return
-	var old_cell_texts := _snapshot_cell_texts()
-	var old_cell_authors := _snapshot_cell_authors()
-	var old_cell_author_names := _snapshot_cell_author_names()
+	var snap: Dictionary = _snapshot_cell_data()
 	_cells[k] = true
-	_reconcile_texts(old_cell_texts, old_cell_authors, old_cell_author_names)
+	_reconcile_texts(snap["texts"], snap["authors"], snap["names"])
 	emit_signal("blocks_changed")
 	if broadcast and not _applying_remote and _live_session():
 		rpc("_rpc_place", int(cell.x), int(cell.y))
@@ -273,11 +272,9 @@ func remove(cell: Vector2, broadcast: bool) -> void :
 	var k := _key(cell)
 	if not _cells.has(k):
 		return
-	var old_cell_texts := _snapshot_cell_texts()
-	var old_cell_authors := _snapshot_cell_authors()
-	var old_cell_author_names := _snapshot_cell_author_names()
+	var snap: Dictionary = _snapshot_cell_data()
 	var _e = _cells.erase(k)
-	_reconcile_texts(old_cell_texts, old_cell_authors, old_cell_author_names)
+	_reconcile_texts(snap["texts"], snap["authors"], snap["names"])
 	emit_signal("blocks_changed")
 	if broadcast and not _applying_remote and _live_session():
 		rpc("_rpc_remove", int(cell.x), int(cell.y))
@@ -287,6 +284,88 @@ func remove(cell: Vector2, broadcast: bool) -> void :
 func remove_group(cell: Vector2, broadcast: bool) -> void :
 	for c in group_cells(cell):
 		remove(c, broadcast)
+
+
+# --- moving a whole group (drag with the selection tool) --------------------------------------
+# True if `cell` (grid coords) sits fully inside the board.
+func _cell_in_board(cell: Vector2) -> bool:
+	var s := CELL_SIZE
+	var r: Rect2 = C.CIRCUIT.RECT
+	return cell.x >= 0 and cell.y >= 0 \
+		and (cell.x + 1) * s <= r.size.x and (cell.y + 1) * s <= r.size.y
+
+
+# Can the group that contains `member` be shifted by `delta` (in grid cells)? The target must stay
+# on the board and must NOT be dropped on top of — nor made to touch — another comment. Concretely
+# the shifted footprint may not OVERLAP any cell of a different group, and may not be 4-adjacent to
+# any OTHER group when either that neighbour OR the moved group is a WRITTEN (non-empty) comment.
+# This keeps two unrelated comments from being mixed by a move (see the move UX): a move that lands
+# over/against an already-edited comment is rejected, so the caller reverts to the old position.
+func can_move_group(member: Vector2, delta: Vector2) -> bool:
+	if int(delta.x) == 0 and int(delta.y) == 0:
+		return true
+	var g := group_cells(member)
+	if g.empty():
+		return false
+	var moved := {}
+	for c in g:
+		moved[_key(c)] = true
+	var moved_written: bool = get_text(member) != ""
+	for c in g:
+		var t: Vector2 = c + delta
+		if not _cell_in_board(t):
+			return false
+		var tk := _key(t)
+		if _cells.has(tk) and not moved.has(tk):
+			return false  # would overlap a different comment
+		for d in _NEIGHBORS:
+			var n: Vector2 = t + d
+			var nk := _key(n)
+			if _cells.has(nk) and not moved.has(nk):
+				# `n` belongs to a different existing group. Refuse the move if either side is a
+				# written comment (don't let a move fuse/touch an edited comment).
+				if moved_written or get_text(n) != "":
+					return false
+	return true
+
+
+# Shift a whole group by `delta` (grid cells), carrying its text/author/name to the new anchor. Only
+# ever moves a group as a unit (it doesn't merge), and only when `can_move_group` allows it — so a
+# drop over/against another edited comment is refused (returns false; the caller keeps the old spot).
+func move_group(member: Vector2, delta: Vector2, broadcast: bool) -> bool:
+	if int(delta.x) == 0 and int(delta.y) == 0:
+		return false
+	if not can_move_group(member, delta):
+		return false
+	var g := group_cells(member)
+	if g.empty():
+		return false
+	var old_anchor := _min_cell(g)
+	var oak := _key(old_anchor)
+	var text := String(_texts.get(oak, ""))
+	var author: int = int(_authors.get(oak, 0))
+	var aname := String(_author_names.get(oak, ""))
+	# Vacate every old cell first, then occupy the shifted cells, so a small (overlapping) move
+	# can't corrupt `_cells`.
+	for c in g:
+		var _e = _cells.erase(_key(c))
+	var new_cells := []
+	for c in g:
+		var t: Vector2 = c + delta
+		_cells[_key(t)] = true
+		new_cells.append(t)
+	var _e2 = _texts.erase(oak)
+	var _e3 = _authors.erase(oak)
+	var _e4 = _author_names.erase(oak)
+	if text != "":
+		var nak := _key(_min_cell(new_cells))
+		_texts[nak] = text
+		_authors[nak] = author
+		_author_names[nak] = aname
+	emit_signal("blocks_changed")
+	if broadcast and not _applying_remote and _live_session():
+		rpc("_rpc_move_group", int(old_anchor.x), int(old_anchor.y), int(delta.x), int(delta.y))
+	return true
 
 
 # Set a group's text (keyed by its anchor). Streamed live to the peer as the user types.
@@ -309,44 +388,30 @@ func set_text(cell: Vector2, text: String, broadcast: bool) -> void :
 		rpc("_rpc_set_text", int(anchor.x), int(anchor.y), text, author, author_name)
 
 
-# Snapshot the CURRENT text of every occupied cell (each cell of a non-empty group maps to that
-# group's text), taken BEFORE a place/remove mutates `_cells`. `_reconcile_texts` uses it to carry
-# each group's text onto whatever cells survive — so a comment is only lost when its LAST block is
-# removed, not when the specific anchor (top-left) cell happens to be the one deleted.
-func _snapshot_cell_texts() -> Dictionary:
-	var out := {}
-	for g in _compute_groups():
-		var t := String(_texts.get(_key(_min_cell(g)), ""))
-		if t != "":
-			for c in g:
-				out[_key(c)] = t
-	return out
-
-
-# Parallel to _snapshot_cell_texts: each cell of a non-empty group -> that group's author id.
-func _snapshot_cell_authors() -> Dictionary:
-	var out := {}
+# Snapshot the CURRENT text / author / author-name of every occupied cell (each cell of a non-empty
+# group maps to that group's values), taken BEFORE a place/remove mutates `_cells`. All three maps
+# are built in ONE `_compute_groups()` pass — the previous code ran three separate passes (plus the
+# one in `_reconcile_texts`), so every single placed/erased cell recomputed the connected components
+# four times over. On a big board that O(cells) flood-fill × 4, once per cell of a drag, was the
+# bulk of the drawing/dragging lag; folding the snapshots into one pass halves it. `_reconcile_texts`
+# uses these to carry each group's text onto whatever cells survive — so a comment is only lost when
+# its LAST block is removed, not when the specific anchor (top-left) cell happens to be deleted.
+func _snapshot_cell_data() -> Dictionary:
+	var texts := {}
+	var authors := {}
+	var names := {}
 	for g in _compute_groups():
 		var ak := _key(_min_cell(g))
 		var t := String(_texts.get(ak, ""))
 		if t != "":
 			var a: int = int(_authors.get(ak, 0))
-			for c in g:
-				out[_key(c)] = a
-	return out
-
-
-# Parallel to _snapshot_cell_texts: each cell of a non-empty group -> that group's author name.
-func _snapshot_cell_author_names() -> Dictionary:
-	var out := {}
-	for g in _compute_groups():
-		var ak := _key(_min_cell(g))
-		var t := String(_texts.get(ak, ""))
-		if t != "":
 			var nm := String(_author_names.get(ak, ""))
 			for c in g:
-				out[_key(c)] = nm
-	return out
+				var ck := _key(c)
+				texts[ck] = t
+				authors[ck] = a
+				names[ck] = nm
+	return {"texts": texts, "authors": authors, "names": names}
 
 
 # Recompute every group's anchor and re-home its text there. Each group inherits the text carried
@@ -535,6 +600,12 @@ remote func _rpc_place(cx: int, cy: int) -> void :
 remote func _rpc_remove(cx: int, cy: int) -> void :
 	_applying_remote = true
 	remove(Vector2(cx, cy), false)
+	_applying_remote = false
+
+
+remote func _rpc_move_group(ax: int, ay: int, dx: int, dy: int) -> void :
+	_applying_remote = true
+	var _ok = move_group(Vector2(ax, ay), Vector2(dx, dy), false)
 	_applying_remote = false
 
 
