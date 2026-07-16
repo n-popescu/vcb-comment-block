@@ -31,11 +31,15 @@ const MOD_ROOT := "res://mods-unpacked/npopescu-VCBCommentBlock"
 const SCRIPTS := MOD_ROOT + "/scripts"
 const EXTENSIONS := MOD_ROOT + "/extensions"
 const MAIN_THEME := "res://src/gui/themes/main_theme.tres"
+# The game's own checkbox widget (same one VCB Improvements + the array "Multicolored Traces"
+# option use), for the sim-mode "Show comments" toggle.
+const CHECKBOX_SCENE := "res://src/gui/flux/flux_btn_checkbox.tscn"
 
 var _core_built := false
 var _ink_registered := false
 var _palette_wired := false
 var _quickmenu_wired := false
+var _simcheck_wired := false
 # The circuit-editor panel and the quick menu build themselves a little after Main appears (docking
 # instances the side panels, the menu fills its `buttons` list in its own _ready), so we keep
 # retrying the ink wiring for a while rather than giving up after one frame.
@@ -66,19 +70,21 @@ func _process(_delta: float) -> void :
 	if not _core_built:
 		if not _build_core():
 			return
-	# Keep trying to wire the palette + quick-menu ink entries until both are in place.
+	# Keep trying to wire the palette + quick-menu ink entries + sim checkbox until all are in place.
 	if not _palette_wired:
 		_palette_wired = _wire_palette()
 	if not _quickmenu_wired:
 		_quickmenu_wired = _wire_quickmenu()
+	if not _simcheck_wired:
+		_simcheck_wired = _wire_sim_checkbox()
 	_wire_frames += 1
-	if _palette_wired and _quickmenu_wired:
-		ModLoaderLog.info("Comment ink added to the ink palette + Q/A quick menu.", MOD_DIR)
+	if _palette_wired and _quickmenu_wired and _simcheck_wired:
+		ModLoaderLog.info("Comment ink added to the ink palette + Q/A quick menu + sim checkbox.", MOD_DIR)
 		set_process(false)
 	elif _wire_frames > _WIRE_LIMIT:
 		ModLoaderLog.warning(
-			"Gave up wiring the comment ink (palette=%s, quickmenu=%s). %s"
-				% [_palette_wired, _quickmenu_wired, _diagnose()],
+			"Gave up wiring the comment ink (palette=%s, quickmenu=%s, simcheck=%s). %s"
+				% [_palette_wired, _quickmenu_wired, _simcheck_wired, _diagnose()],
 			MOD_DIR)
 		set_process(false)
 
@@ -251,6 +257,52 @@ func _wire_quickmenu() -> bool:
 		btn.public_enable_ink_switch_usage()
 	qm.buttons.append(btn)
 	_overlay.register_button(btn)
+	return true
+
+
+# Sim-mode "Show comments" checkbox: the game's own flux checkbox, placed in the Simulation side
+# panel ABOVE the Toggle/Press (Mouse Interaction Mode) bar. That panel is shown only while
+# simulating, so the checkbox is sim-only and keeps its state across sim stop/restart (its node is
+# never rebuilt). When off, the overlay hides all comment visuals during simulation; when on,
+# hovering a comment reveals its zone + text. Idempotent; returns true once handled.
+func _wire_sim_checkbox() -> bool:
+	if _main == null or _overlay == null:
+		return false
+	var sim_bar := _main.find_node("SimulatorBar2", true, false)
+	if sim_bar == null:
+		return false
+	var sim_vbox := sim_bar.get_parent()
+	if sim_vbox == null:
+		return false
+	var existing = sim_vbox.get_node_or_null("BtnShowComments")
+	if existing != null:
+		if _overlay.has_method("set_show_checkbox"):
+			_overlay.set_show_checkbox(existing)
+		return true
+	if not ResourceLoader.exists(CHECKBOX_SCENE):
+		return true  # widget missing — don't block the other wiring forever
+	var scn = load(CHECKBOX_SCENE)
+	if scn == null:
+		return true
+	var cb = scn.instance()
+	cb.name = "BtnShowComments"
+	cb.title = "Show comments"
+	if cb.has_node("Label"):
+		cb.get_node("Label").text = "Show comments"
+		# The widget's Label defaults to EXPAND_FILL (shoves the box to the far right); drop EXPAND
+		# so the check box sits right next to the label, matching the VCB Improvements checkboxes.
+		cb.get_node("Label").size_flags_horizontal = Control.SIZE_FILL
+	cb.hint_tooltip = "While simulating, reveal comment blocks on hover:\npass the mouse over a comment to show its zone\nand read its text. Off = comments stay hidden\nduring simulation (so the board stays clean)."
+	sim_vbox.add_child(cb)
+	# Sit ABOVE the Toggle/Press bar — above its "Mouse Interaction Mode" label (Label2) when that's
+	# present, so the label stays glued to its buttons.
+	var label2 = sim_vbox.get_node_or_null("Label2")
+	var target_index = sim_bar.get_index()
+	if label2 != null:
+		target_index = label2.get_index()
+	sim_vbox.move_child(cb, target_index)
+	if _overlay.has_method("set_show_checkbox"):
+		_overlay.set_show_checkbox(cb)
 	return true
 
 
