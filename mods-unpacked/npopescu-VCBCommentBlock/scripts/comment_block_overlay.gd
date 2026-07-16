@@ -75,6 +75,11 @@ var _brush_px := 8
 # Placement preview: the top-left cell of where the next block would land while the comment ink is
 # active (or (-1,-1) when there's nothing to preview).
 var _preview_origin := Vector2(-1, -1)
+# Last comment-mode presence we broadcast to peers (resent only on change), so the other player can
+# see our placement preview in our multiplayer colour.
+var _last_presence_active := false
+var _last_presence_brush := 8
+var _last_presence_cell := Vector2(-1, -1)
 
 # Tooltip (screen-space, on its own CanvasLayer so it ignores the board camera transform).
 var _tip_layer: CanvasLayer
@@ -158,6 +163,8 @@ func _ready() -> void :
 	if _sync != null:
 		_cell = int(_sync.get_cell_size())
 		_sync.connect("blocks_changed", self, "_on_blocks_changed")
+		if _sync.has_signal("presence_changed") and not _sync.is_connected("presence_changed", self, "_on_blocks_changed"):
+			var _ep = _sync.connect("presence_changed", self, "_on_blocks_changed")
 	# Seed the "previous ink" with whatever ink is active now, so leaving comment drawing (via a
 	# tool pick or simulation) can always hand the highlight back to a real ink — even if COMMENT
 	# is the very first ink the user selects after the game loads.
@@ -257,7 +264,9 @@ func _draw() -> void :
 			maxy = max(maxy, c.y)
 		var bw: float = (maxx - minx + 1.0) * s
 		var bh: float = (maxy - miny + 1.0) * s
-		var tsz: float = min(bw, bh) * 0.6
+		# A FIXED-size "T", roughly sized to fit an 8x8 tile, always centered on the zone. It must
+		# NOT scale with the zone/group size (a big comment shows the same small marker).
+		var tsz: float = float(_cell) * 2.0 * 0.8
 		var tx: float = minx * s + (bw - tsz) * 0.5
 		var ty: float = miny * s + (bh - tsz) * 0.5
 		var tcol := col
@@ -278,6 +287,35 @@ func _draw() -> void :
 		var side := _footprint_side()
 		var outline := Rect2(_preview_origin.x * s, _preview_origin.y * s, side * s, side * s)
 		draw_rect(outline, BLOCK_EDGE, false, 1.5)
+	# Remote peers' comment placement previews (multiplayer): the footprint each other player would
+	# place, drawn in THAT player's multiplayer colour — so their comment-mode hover is visible here
+	# instead of only the default cursor.
+	if _sync.has_method("get_remote_presence"):
+		var presence = _sync.get_remote_presence()
+		if typeof(presence) == TYPE_DICTIONARY and not presence.empty():
+			var mp := _get_mp()
+			for pid in presence.keys():
+				var info = presence[pid]
+				if typeof(info) != TYPE_DICTIONARY:
+					continue
+				var rcell = info.get("cell", Vector2(-1, -1))
+				if rcell.x < 0:
+					continue
+				var rbrush: int = int(info.get("brush", 8))
+				var rn: int = rbrush / _cell
+				if rn < 1:
+					rn = 1
+				var rcol := Color(0.882, 0.745, 0.514)
+				if mp != null and mp.has_method("get_player_color"):
+					rcol = mp.get_player_color(int(pid))
+				var rfill := rcol
+				rfill.a = 0.30
+				for dy in range(rn):
+					for dx in range(rn):
+						draw_rect(Rect2((rcell.x + dx) * s, (rcell.y + dy) * s, s, s), rfill, true)
+				var redge := rcol
+				redge.a = 0.95
+				draw_rect(Rect2(rcell.x * s, rcell.y * s, rn * s, rn * s), redge, false, 1.5)
 
 
 # --- hover tooltip + zone-overlay fade --------------------------------------------------------
@@ -305,6 +343,18 @@ func _process(delta: float) -> void :
 	if new_preview != _preview_origin:
 		_preview_origin = new_preview
 		update()
+	# Broadcast our comment-mode presence (brush + hovered cell) so the peer can preview our
+	# placement in our colour. Resent only when it changes (or when we enter/leave comment mode).
+	var pres_active := _active and _preview_origin.x >= 0
+	var pres_changed := pres_active != _last_presence_active
+	if pres_active and (_preview_origin != _last_presence_cell or _brush_px != _last_presence_brush):
+		pres_changed = true
+	if pres_changed:
+		_last_presence_active = pres_active
+		_last_presence_cell = _preview_origin
+		_last_presence_brush = _brush_px
+		if _sync.has_method("broadcast_presence"):
+			_sync.broadcast_presence(pres_active, _brush_px, _preview_origin)
 	# Tooltip follows the mouse (offset lower-right so the pointer doesn't cover the text). In a
 	# multiplayer session it's prefixed with the note author's name and its border is tinted the
 	# author's colour; solo it stays the default warm tan.
@@ -521,11 +571,12 @@ func _ev_mi_mouse_input_on_board(_mode: int, _args: Dictionary) -> void :
 		elif p_is_pressed and _drag_place:
 			_place_footprint(cell)
 	else:
-		# Right button erases (click + drag), like erasing a trace.
+		# Right button erases (click + drag), like erasing a trace — a footprint of the chosen
+		# tile size (4x4 or 8x8), so deleting matches the size you place with.
 		if p_is_just_pressed:
 			_drag_erase = true
-		if _drag_erase and _sync.has_block(cell):
-			_sync.remove(cell, true)
+		if _drag_erase:
+			_erase_footprint(cell)
 
 
 # Place every not-yet-present cell of the current brush footprint anchored at `origin`.
@@ -533,6 +584,14 @@ func _place_footprint(origin: Vector2) -> void :
 	for c in _footprint_cells(origin):
 		if not _sync.has_block(c):
 			_sync.place(c, true)
+
+
+# Remove every present cell of the current brush footprint anchored at `origin` (so a
+# right-click/drag deletes at the chosen 4x4 / 8x8 tile size).
+func _erase_footprint(origin: Vector2) -> void :
+	for c in _footprint_cells(origin):
+		if _sync.has_block(c):
+			_sync.remove(c, true)
 
 
 func _open_editor(cell: Vector2) -> void :

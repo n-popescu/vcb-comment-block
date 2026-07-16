@@ -71,15 +71,22 @@ mods use to add their own controls to the circuit-editor panel.
   re-homes each group's text at its (possibly new) anchor by inheriting the text carried by ANY of
   its cells in that snapshot. So a comment follows its group as it grows/shrinks/re-anchors and is
   **only lost when the group's LAST block is removed** — deleting the top-left/anchor cell no longer
-  drops it. Merging joins distinct non-empty texts with a newline; splitting keeps the text on each
-  surviving piece. `set_text` writes at the anchor. `remove_group` clears a whole group.
-- Emits `blocks_changed` (overlay redraws) and `text_changed(anchor_key, text)` (open popup on a
-  peer updates live).
-- **Author attribution (MP):** each non-empty group records an author peer id (`_authors`, keyed
-  like `_texts`, carried through reconcile + the `_rpc_set_text`/save state). The overlay tints each
-  group's fill/edge/T and the hover tooltip's border by `MP.get_player_color(author)` and prefixes
-  the tooltip with `MP.get_player_name(author)` ("name: text"); solo (author 0 / MP absent) keeps
-  the default warm tan and no prefix.
+  drops it. Splitting keeps the text on each surviving piece. `set_text` writes at the anchor.
+  `remove_group` clears a whole group.
+- **Two written comments never fuse or touch.** `place()` refuses any block that would connect two
+  or more DISTINCT non-empty groups (`_would_bridge_nonempty`), so you can only grow/merge with
+  EMPTY blocks — an empty new comment may still merge into ONE existing written comment (which is
+  how you attach to it), and merging only ever carries a single non-empty text. The guard runs on
+  both peers identically (they share the same block state), so boards stay consistent.
+- Emits `blocks_changed` (overlay redraws), `text_changed(anchor_key, text)` (open popup on a
+  peer updates live), and `presence_changed` (a peer's comment-mode hover changed — see §2.4).
+- **Author attribution (MP):** each non-empty group records an author peer id (`_authors`) **and the
+  author's display name** (`_author_names`), both keyed like `_texts`, carried through reconcile +
+  the `_rpc_set_text`/save state. The overlay tints each group's fill/edge/T and the hover tooltip's
+  border by `MP.get_player_color(author)` and prefixes the tooltip with the author's name. The name
+  is **persisted** (and preferred on display), so a file made in multiplayer still shows who wrote
+  each note when later opened **solo** (peer ids don't survive across sessions; names do). Solo
+  authoring (author 0 / MP absent) keeps the default warm tan and no prefix.
 
 ### 2.2 Overlay (`comment_block_overlay.gd`, a `Node2D` under `Main/World`)
 - Sibling of `CursorBoard`, so it shares board-pixel space and pans/zooms with the camera (the
@@ -88,13 +95,14 @@ mods use to add their own controls to the circuit-editor panel.
   useful and **faded**: every cell at `_all_alpha` (→1 while the comment ink is active, so you can
   see all zones while placing), plus the hovered zone's cells at `_hover_alpha` (→1 while hovering a
   zone with any *other* tool). Cells with ~0 alpha are skipped. (2) The **"T" marker** (the stock
-  `text_symbol.png` glyph, `T_ICON_PATH`, tinted `T_TINT`) drawn at each group's **anchor** (its
-  top-left cell), **always** — so a comment reads as an annotation without the orange covering the
-  board. Falls back to the old quote glyph if the texture is missing. `_process` eases `_all_alpha`
-  / `_hover_alpha` toward their targets (`_approach`, `FADE_SPEED` ≈ 0.12 s) and `update()`s while
-  they move (Node2D otherwise retains the last frame, so a steady state costs no redraws). The
-  hovered zone's cell set (`_hover_cells`, keyed like the sync) is recomputed only when the hovered
-  **anchor** changes.
+  `text_symbol.png` glyph, `T_ICON_PATH`, tinted `T_TINT`) drawn **centered on each group at a FIXED
+  size** (`_cell * 2 * 0.8`, i.e. roughly an 8×8 tile) — it must **not** scale with the zone/group
+  size, so a big comment still shows the same small marker. Falls back to the old quote glyph if the
+  texture is missing. (3) In a live session, each **remote peer's comment placement preview** (their
+  footprint, from the synced presence in §2.4) is drawn in that peer's multiplayer colour, so you
+  see their comment-mode hover, not just the default cursor. `_process` eases `_all_alpha` /
+  `_hover_alpha` toward their targets (`_approach`, `FADE_SPEED` ≈ 0.12 s) and `update()`s while
+  they move.
 - **Hover tooltip**: polled in `_process` from `get_global_mouse_position()` (board coords) gated
   by `_is_world_frame` (from `E.ui_context_change`, `C.CONTEXT.WORLD_FRAME`). The tooltip is a
   `Label` in a `PanelContainer` on its own `CanvasLayer` (screen space), positioned at
@@ -126,10 +134,17 @@ mods use to add their own controls to the circuit-editor panel.
   buttons. `_prev_ink_id` is seeded from the editor's current ink in `_ready` so the first pick can
   always be handed back.
 - **Board draw/erase** (via `E.mi_mouse_input_on_board`, only while the comment ink is active + edit
-  mode + inside `C.CIRCUIT.RECT`): it draws like a trace — **left** click/drag `place`s blocks
-  (drag tracked with `_drag_place`); a plain left click on an **existing** block opens the popup
-  instead of starting a drag; **right** click/drag `remove`s blocks (`_drag_erase`). Drag flags
-  reset on release / leave.
+  mode + inside `C.CIRCUIT.RECT`): it draws like a trace — **left** click/drag `place`s a footprint
+  of the chosen tile size (drag tracked with `_drag_place`); a plain left click on an **existing**
+  block opens the popup instead of starting a drag; **right** click/drag `_erase_footprint`s at the
+  SAME chosen tile size (so you delete as 4×4 or 8×8, matching what you place). Drag flags reset on
+  release / leave.
+- **Size menu + "+" affordance:** the palette comment button (`comment_ink_button.gd`) shows VCB's
+  arrow-with-plus cursor on hover (`mouse_default_cursor_shape = CURSOR_FORBIDDEN`, which the game
+  remaps to `arrow_right.png` — the same affordance the stock trace/bus ink-group buttons use) and
+  opens its 4×4 / 8×8 popup **directly above the button** (positioned from the panel's explicit
+  `rect_min_size`, mirroring `btn_ink_group.gd`, so it never overlaps the button). The menu marks
+  the current size and drives `overlay.set_brush_size`.
 
 ### 2.3 Editor popup (`comment_edit_window.gd`, a themed `WindowDialog`)
 - Same window kind/theme as the Multiplayer / Board Size dialogs. Holds a multi-line `TextEdit`
@@ -143,16 +158,21 @@ mods use to add their own controls to the circuit-editor panel.
   = MP autoload present + `network_peer` + `is_connected` + `is_game_started`, all via
   `get_node_or_null`/`Object.get` so it works with MP absent.
 - `remote func _rpc_place/_rpc_remove/_rpc_set_text` mirror edits (guarded by `_applying_remote`).
-  Text is streamed live. `_on_mp_player_connected` (host) pushes the whole state to a late joiner
-  via `rpc_id(id, "_rpc_sync_all", to_json(export_state()))`. The MP autoload is found by polling
-  in `_process` (load order isn't fixed), then its `player_connected` signal is hooked.
+  Text is streamed live; `_rpc_set_text` also carries the author id **and name**. `_on_mp_player_connected`
+  (host) pushes the whole state to a late joiner via `rpc_id(id, "_rpc_sync_all", …)`. Each peer also
+  broadcasts a light **comment-mode presence** — `broadcast_presence(active, brush, cell)` →
+  `_rpc_presence` → `_remote_presence[peer]` + `presence_changed` — so the overlay can draw that
+  player's placement footprint in their colour (§2.2). Presence is never persisted and is cleared on
+  `player_disconnected`. The MP autoload is found by polling in `_process` (load order isn't fixed),
+  then its `player_connected` / `player_disconnected` signals are hooked.
 
 ### 2.5 Persistence (`extensions/file_system.gd`)
 - Shared **`modded`** convention (same as the Board Size mod): `save_file` merges
-  `modded["npopescu-VCBCommentBlock"] = {cells, texts}` (dropping it when there are no blocks, so a
-  comment-free board stays vanilla-openable); `open_file` restores after the base loads, and
-  broadcasts the loaded state to peers in a live session. Both this mod and the Board Size mod
-  extend `file_system.gd`; they coexist because each only touches its own key and calls the base.
+  `modded["npopescu-VCBCommentBlock"] = {v, cell, cells, texts, authors, author_names}` (dropping it
+  when there are no blocks, so a comment-free board stays vanilla-openable); `open_file` restores
+  after the base loads, and broadcasts the loaded state to peers in a live session. Both this mod and
+  the Board Size mod extend `file_system.gd`; they coexist because each only touches its own key and
+  calls the base.
 
 ## 3. Known limitations / assumptions to verify in-engine
 
