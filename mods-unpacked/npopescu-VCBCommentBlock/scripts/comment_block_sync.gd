@@ -15,15 +15,26 @@ extends Node
 # bigger block. Each group's text is stored at its ANCHOR cell (top-most, then left-most), so the
 # text follows the group as it grows/shrinks.
 #
-#   _cells : { "cx,cy": true }              every occupied cell
-#   _texts : { "<anchor cx,cy>": "text" }   one entry per non-empty group, keyed by its anchor
+#   _cells        : { "cx,cy": true }              every occupied cell
+#   _texts        : { "<anchor cx,cy>": "text" }   one entry per non-empty group, keyed by its anchor
+#   _authors      : { "<anchor cx,cy>": peer_id }  who wrote each non-empty group (0 = solo/unknown)
+#   _author_names : { "<anchor cx,cy>": "name" }   the author's DISPLAY NAME, snapshotted at write
+#                                                  time so it still shows when the file is later
+#                                                  opened solo (peer ids are per-session; names are
+#                                                  what a reader actually wants).
+#
+# Two DIFFERENT written comments never fuse or touch: a placement that would connect two or more
+# distinct non-empty groups is refused (see place()). You can only grow/merge using EMPTY blocks, so
+# an empty new comment may still merge into a single existing written comment.
 #
 # Multiplayer
 # -----------
 # When the VCB Multiplayer mod has a live peer, placements / removals / live text edits are mirrored
 # over its ENet peer (this mod never opens its own), and the host pushes the whole state to a late
-# joiner. All MP calls are guarded by _live_session() via get_node_or_null/Object.get, so the mod
-# works fine with the Multiplayer mod absent.
+# joiner. Each peer also broadcasts a light "presence" (its comment-mode brush size + hovered cell)
+# so the other side can draw that player's comment placement preview in their multiplayer colour.
+# All MP calls are guarded by _live_session() via get_node_or_null/Object.get, so the mod works fine
+# with the Multiplayer mod absent.
 
 const CELL_SIZE := 4
 
@@ -31,8 +42,16 @@ var _cells := {}
 var _texts := {}
 # anchor key -> author peer id (who wrote the note). 0 = solo / unknown (default colour, no name).
 var _authors := {}
+# anchor key -> author display name, snapshotted when the note is written (so it survives to a later
+# solo open, where peer ids no longer resolve to people).
+var _author_names := {}
 
 var _applying_remote := false
+
+# Remote comment-mode presence, peer id -> { "brush": int, "cell": Vector2 } (only present while that
+# peer is actively drawing comments). The overlay draws a placement preview for each, in the peer's
+# multiplayer colour. Never persisted.
+var _remote_presence := {}
 
 # Multiplayer hook (mod load order isn't fixed, so poll for the MP autoload, then connect once).
 var _mp_hooked := false
@@ -41,6 +60,7 @@ const _MP_POLL_LIMIT := 3600  # ~1 min at 60 fps, then give up (MP mod simply is
 
 signal blocks_changed
 signal text_changed(anchor_key, text)
+signal presence_changed
 
 
 func _ready() -> void :
@@ -58,6 +78,8 @@ func _process(_delta: float) -> void :
 	var mp := get_tree().root.get_node_or_null("MP")
 	if mp != null and mp.has_signal("player_connected"):
 		mp.connect("player_connected", self, "_on_mp_player_connected")
+		if mp.has_signal("player_disconnected"):
+			mp.connect("player_disconnected", self, "_on_mp_player_disconnected")
 		_mp_hooked = true
 		set_process(false)
 	elif _mp_poll_frames > _MP_POLL_LIMIT:
@@ -77,6 +99,8 @@ func reset() -> void :
 	_cells.clear()
 	_texts.clear()
 	_authors.clear()
+	_author_names.clear()
+	_remote_presence.clear()
 	emit_signal("blocks_changed")
 
 
@@ -174,6 +198,15 @@ func get_author(cell: Vector2) -> int:
 	return int(_authors.get(_key(anchor), 0))
 
 
+# The author's saved display name for `cell`'s group ("" when unknown / none). Persisted, so it
+# still resolves after a solo re-open where the peer id no longer maps to a person.
+func get_author_name(cell: Vector2) -> String:
+	var anchor := anchor_of(cell)
+	if anchor.x < 0:
+		return ""
+	return String(_author_names.get(_key(anchor), ""))
+
+
 # Our own author id: our multiplayer peer id in a session, else 0 (solo → default colour, no name).
 func _current_author() -> int:
 	var mp := get_tree().root.get_node_or_null("MP")
@@ -182,15 +215,55 @@ func _current_author() -> int:
 	return 0
 
 
+# Our own display name, for stamping onto notes we write (so it persists into the file). "" solo.
+func _current_author_name() -> String:
+	var mp := get_tree().root.get_node_or_null("MP")
+	if mp == null:
+		return ""
+	var mine: int = int(mp.get("my_id"))
+	if mine == 0:
+		return ""
+	if mp.has_method("get_player_name"):
+		return String(mp.get_player_name(mine))
+	var pn = mp.get("player_name")
+	if pn != null:
+		return String(pn)
+	return ""
+
+
+# True if placing `cell` would connect two or more DISTINCT non-empty comment groups. Such a
+# placement is refused (see place()) so two written comments never fuse or touch — you can only
+# grow/merge using EMPTY blocks (an empty new comment may still merge into ONE written comment).
+func _would_bridge_nonempty(cell: Vector2) -> bool:
+	var anchors := []
+	for d in [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1)]:
+		var n: Vector2 = cell + d
+		var nk := _key(n)
+		if not _cells.has(nk):
+			continue
+		var anchor := anchor_of(n)
+		var ak := _key(anchor)
+		if ak in anchors:
+			continue
+		if String(_texts.get(ak, "")) != "":
+			anchors.append(ak)
+	return anchors.size() >= 2
+
+
 # --- mutations --------------------------------------------------------------------------------
 func place(cell: Vector2, broadcast: bool) -> void :
 	var k := _key(cell)
 	if _cells.has(k):
 		return
+	# Refuse a placement that would bridge two written comments (keeps distinct non-empty comments
+	# from fusing or touching). Applied on both peers identically, so boards stay consistent.
+	if _would_bridge_nonempty(cell):
+		return
 	var old_cell_texts := _snapshot_cell_texts()
 	var old_cell_authors := _snapshot_cell_authors()
+	var old_cell_author_names := _snapshot_cell_author_names()
 	_cells[k] = true
-	_reconcile_texts(old_cell_texts, old_cell_authors)
+	_reconcile_texts(old_cell_texts, old_cell_authors, old_cell_author_names)
 	emit_signal("blocks_changed")
 	if broadcast and not _applying_remote and _live_session():
 		rpc("_rpc_place", int(cell.x), int(cell.y))
@@ -202,8 +275,9 @@ func remove(cell: Vector2, broadcast: bool) -> void :
 		return
 	var old_cell_texts := _snapshot_cell_texts()
 	var old_cell_authors := _snapshot_cell_authors()
+	var old_cell_author_names := _snapshot_cell_author_names()
 	var _e = _cells.erase(k)
-	_reconcile_texts(old_cell_texts, old_cell_authors)
+	_reconcile_texts(old_cell_texts, old_cell_authors, old_cell_author_names)
 	emit_signal("blocks_changed")
 	if broadcast and not _applying_remote and _live_session():
 		rpc("_rpc_remove", int(cell.x), int(cell.y))
@@ -222,14 +296,17 @@ func set_text(cell: Vector2, text: String, broadcast: bool) -> void :
 		return
 	var ak := _key(anchor)
 	var author := _current_author()
+	var author_name := _current_author_name()
 	if text == "":
 		var _e = _texts.erase(ak)
 		var _e2 = _authors.erase(ak)
+		var _e3 = _author_names.erase(ak)
 	else:
 		_texts[ak] = text
 		_authors[ak] = author
+		_author_names[ak] = author_name
 	if broadcast and not _applying_remote and _live_session():
-		rpc("_rpc_set_text", int(anchor.x), int(anchor.y), text, author)
+		rpc("_rpc_set_text", int(anchor.x), int(anchor.y), text, author, author_name)
 
 
 # Snapshot the CURRENT text of every occupied cell (each cell of a non-empty group maps to that
@@ -259,34 +336,54 @@ func _snapshot_cell_authors() -> Dictionary:
 	return out
 
 
+# Parallel to _snapshot_cell_texts: each cell of a non-empty group -> that group's author name.
+func _snapshot_cell_author_names() -> Dictionary:
+	var out := {}
+	for g in _compute_groups():
+		var ak := _key(_min_cell(g))
+		var t := String(_texts.get(ak, ""))
+		if t != "":
+			var nm := String(_author_names.get(ak, ""))
+			for c in g:
+				out[_key(c)] = nm
+	return out
+
+
 # Recompute every group's anchor and re-home its text there. Each group inherits the text carried
 # by any of its cells in `old_cell_texts` (the pre-mutation per-cell snapshot): so text follows the
 # group as it grows/shrinks/re-anchors, and survives deleting the old anchor cell. When groups merge
 # their distinct non-empty texts are joined by a newline; when a group splits, each surviving piece
-# keeps the text (the comment only disappears once every block of the group is gone).
-func _reconcile_texts(old_cell_texts: Dictionary, old_cell_authors: Dictionary = {}) -> void :
+# keeps the text (the comment only disappears once every block of the group is gone). Author id +
+# name ride along, taken from the first contributing cell.
+func _reconcile_texts(old_cell_texts: Dictionary, old_cell_authors: Dictionary = {}, old_cell_author_names: Dictionary = {}) -> void :
 	var groups := _compute_groups()
 	var new_texts := {}
 	var new_authors := {}
+	var new_author_names := {}
 	for g in groups:
 		var anchor := _min_cell(g)
 		var parts := []
 		var author: int = 0
+		var author_name := ""
 		for c in g:
 			var ck := _key(c)
 			if old_cell_texts.has(ck):
 				var t: String = String(old_cell_texts[ck])
 				if t != "" and not (t in parts):
 					parts.append(t)
-					# The merged note keeps the first contributing cell's author.
+					# The merged note keeps the first contributing cell's author + name.
 					if author == 0 and old_cell_authors.has(ck):
 						author = int(old_cell_authors[ck])
+					if author_name == "" and old_cell_author_names.has(ck):
+						author_name = String(old_cell_author_names[ck])
 		if not parts.empty():
 			var ak := _key(anchor)
 			new_texts[ak] = PoolStringArray(parts).join("\n")
 			new_authors[ak] = author
+			new_author_names[ak] = author_name
 	_texts = new_texts
 	_authors = new_authors
+	_author_names = new_author_names
 
 
 func _compute_groups() -> Array:
@@ -315,7 +412,14 @@ func export_state() -> Dictionary:
 	for k in _cells.keys():
 		var c := _cell_from_key(k)
 		cells.append([int(c.x), int(c.y)])
-	return {"v": 2, "cell": CELL_SIZE, "cells": cells, "texts": _texts.duplicate(), "authors": _authors.duplicate()}
+	return {
+		"v": 2,
+		"cell": CELL_SIZE,
+		"cells": cells,
+		"texts": _texts.duplicate(),
+		"authors": _authors.duplicate(),
+		"author_names": _author_names.duplicate(),
+	}
 
 
 func import_state(data) -> void :
@@ -323,6 +427,7 @@ func import_state(data) -> void :
 	_cells.clear()
 	_texts.clear()
 	_authors.clear()
+	_author_names.clear()
 	if typeof(data) == TYPE_DICTIONARY:
 		# Files saved before the grid was halved (v1, no "v" key) stored cells on the old 8px grid.
 		# Scale them onto the 4px grid: each old cell becomes a 2x2 block and each text key moves to
@@ -341,21 +446,25 @@ func import_state(data) -> void :
 		var texts = data.get("texts", {})
 		if typeof(texts) == TYPE_DICTIONARY:
 			for tk in texts.keys():
-				var nk: String = String(tk)
-				if scale != 1:
-					var oc: Vector2 = _cell_from_key(String(tk))
-					nk = _key(Vector2(int(oc.x) * scale, int(oc.y) * scale))
-				_texts[nk] = String(texts[tk])
+				_texts[_remap_key(String(tk), scale)] = String(texts[tk])
 		var authors = data.get("authors", {})
 		if typeof(authors) == TYPE_DICTIONARY:
 			for tk in authors.keys():
-				var nk: String = String(tk)
-				if scale != 1:
-					var oc: Vector2 = _cell_from_key(String(tk))
-					nk = _key(Vector2(int(oc.x) * scale, int(oc.y) * scale))
-				_authors[nk] = int(authors[tk])
+				_authors[_remap_key(String(tk), scale)] = int(authors[tk])
+		var author_names = data.get("author_names", {})
+		if typeof(author_names) == TYPE_DICTIONARY:
+			for tk in author_names.keys():
+				_author_names[_remap_key(String(tk), scale)] = String(author_names[tk])
 	_applying_remote = false
 	emit_signal("blocks_changed")
+
+
+# Remap a saved anchor key onto the current grid (v1 8px cells → v2 4px cells scale by 2).
+func _remap_key(k: String, scale: int) -> String:
+	if scale == 1:
+		return k
+	var oc := _cell_from_key(k)
+	return _key(Vector2(int(oc.x) * scale, int(oc.y) * scale))
 
 
 # --- multiplayer ------------------------------------------------------------------------------
@@ -384,6 +493,39 @@ func _on_mp_player_connected(id) -> void :
 	rpc_id(int(id), "_rpc_sync_all", to_json(export_state()))
 
 
+# A peer left: drop any comment-mode presence preview we were drawing for them.
+func _on_mp_player_disconnected(id) -> void :
+	if _remote_presence.has(int(id)):
+		var _e = _remote_presence.erase(int(id))
+		emit_signal("presence_changed")
+
+
+# --- comment-mode presence (so a peer's placement preview shows in their colour) ---------------
+# Broadcast whether WE are actively drawing comments, and where (brush size + hovered cell). The
+# overlay calls this on change. When `active` is false the peer's preview is cleared.
+func broadcast_presence(active: bool, brush: int, cell: Vector2) -> void :
+	if not _live_session():
+		return
+	if active:
+		rpc("_rpc_presence", true, int(brush), int(cell.x), int(cell.y))
+	else:
+		rpc("_rpc_presence", false, int(brush), 0, 0)
+
+
+remote func _rpc_presence(active, brush, cx, cy) -> void :
+	var sender: int = get_tree().get_rpc_sender_id()
+	if bool(active):
+		_remote_presence[sender] = {"brush": int(brush), "cell": Vector2(int(cx), int(cy))}
+	else:
+		var _e = _remote_presence.erase(sender)
+	emit_signal("presence_changed")
+
+
+# Peer id -> { "brush": int, "cell": Vector2 } for every peer currently drawing comments.
+func get_remote_presence() -> Dictionary:
+	return _remote_presence
+
+
 remote func _rpc_place(cx: int, cy: int) -> void :
 	_applying_remote = true
 	place(Vector2(cx, cy), false)
@@ -396,15 +538,17 @@ remote func _rpc_remove(cx: int, cy: int) -> void :
 	_applying_remote = false
 
 
-remote func _rpc_set_text(cx: int, cy: int, text, author = 0) -> void :
+remote func _rpc_set_text(cx: int, cy: int, text, author = 0, author_name = "") -> void :
 	_applying_remote = true
 	var ak := _key(Vector2(cx, cy))
 	if String(text) == "":
 		var _e = _texts.erase(ak)
 		var _e2 = _authors.erase(ak)
+		var _e3 = _author_names.erase(ak)
 	else:
 		_texts[ak] = String(text)
 		_authors[ak] = int(author)
+		_author_names[ak] = String(author_name)
 	_applying_remote = false
 	emit_signal("text_changed", ak, String(text))
 

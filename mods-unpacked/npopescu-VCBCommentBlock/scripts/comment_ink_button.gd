@@ -35,6 +35,9 @@ var _flux: Node = null
 # Right-click size menu (set only on the palette button; the overlay is the shared size owner).
 var _overlay: Node = null
 var _size_popup: Popup = null
+var _menu_panel: PanelContainer = null
+var _b4: Button = null
+var _b8: Button = null
 
 
 func _ready() -> void :
@@ -130,6 +133,11 @@ func public_set_pressed_no_event(p_is_pressed: bool) -> void :
 # placement brush size. Building the popup now (not lazily) lets its layout settle before use.
 func set_size_menu_target(overlay: Node) -> void :
 	_overlay = overlay
+	# Show VCB's "+" / options cursor on hover, and advertise the right-click menu. CURSOR_FORBIDDEN
+	# (8) is remapped by the game to the little arrow-with-plus, the same affordance the stock
+	# trace/bus ink-group buttons use to signal a right-click options popup.
+	mouse_default_cursor_shape = Control.CURSOR_FORBIDDEN
+	hint_tooltip = "Comment — right-click to choose tile size (4x4 / 8x8)"
 	if _size_popup == null:
 		_size_popup = _build_size_menu()
 		add_child(_size_popup)
@@ -142,12 +150,17 @@ func _on_gui_input(event: InputEvent) -> void :
 		_open_size_menu()
 
 
+# Open the size menu directly ABOVE the button (never overlapping it), mirroring the stock
+# ink-group popup: position from the panel's KNOWN min size (reliable before layout), then
+# set_as_minsize().
 func _open_size_menu() -> void :
-	_size_popup.set_as_minsize()
-	var pns: Vector2 = _size_popup.rect_size
+	_mark_current_size()
 	var pos: Vector2 = rect_global_position
-	# Centered above the button (like the stock option popups).
-	_size_popup.popup(Rect2(pos.x + rect_size.x / 2.0 - pns.x / 2.0, pos.y - pns.y - 4.0, pns.x, pns.y))
+	var pns: Vector2 = Vector2(104, 88)
+	if _menu_panel != null:
+		pns = _menu_panel.rect_min_size
+	_size_popup.popup(Rect2(pos.x + rect_size.x / 2.0 - pns.x / 2.0, pos.y - pns.y, 1, 1))
+	_size_popup.set_as_minsize()
 
 
 func _build_size_menu() -> Popup:
@@ -161,6 +174,10 @@ func _build_size_menu() -> Popup:
 	panel.anchor_right = 1.0
 	panel.anchor_bottom = 1.0
 	panel.add_stylebox_override("panel", _menu_panel_style())
+	# Explicit min size so the popup sizes + positions reliably above the button (a fill-anchored
+	# child otherwise leaves the popup's min size at ~0, which made it open over the button).
+	panel.rect_min_size = Vector2(104, 88)
+	_menu_panel = panel
 	pop.add_child(panel)
 	var margin := MarginContainer.new()
 	margin.add_constant_override("margin_left", 8)
@@ -175,18 +192,28 @@ func _build_size_menu() -> Popup:
 	head.text = "Comment tile"
 	head.align = Label.ALIGN_CENTER
 	vb.add_child(head)
-	var b4 := Button.new()
-	b4.text = "4x4"
-	b4.focus_mode = Control.FOCUS_NONE
-	var _e4 = b4.connect("pressed", self, "_on_size_chosen", [4])
-	vb.add_child(b4)
-	var b8 := Button.new()
-	b8.text = "8x8"
-	b8.focus_mode = Control.FOCUS_NONE
-	var _e8 = b8.connect("pressed", self, "_on_size_chosen", [8])
-	vb.add_child(b8)
-	pop.rect_min_size = Vector2(96, 0)
+	_b4 = Button.new()
+	_b4.text = "4x4"
+	_b4.focus_mode = Control.FOCUS_NONE
+	var _e4 = _b4.connect("pressed", self, "_on_size_chosen", [4])
+	vb.add_child(_b4)
+	_b8 = Button.new()
+	_b8.text = "8x8"
+	_b8.focus_mode = Control.FOCUS_NONE
+	var _e8 = _b8.connect("pressed", self, "_on_size_chosen", [8])
+	vb.add_child(_b8)
 	return pop
+
+
+# Reflect the currently selected tile size in the menu (a leading dot on the active one).
+func _mark_current_size() -> void :
+	if _overlay == null or not _overlay.has_method("get_brush_size"):
+		return
+	var cur: int = int(_overlay.get_brush_size())
+	if _b4 != null:
+		_b4.text = ("• 4x4" if cur == 4 else "4x4")
+	if _b8 != null:
+		_b8.text = ("• 8x8" if cur == 8 else "8x8")
 
 
 func _menu_panel_style() -> StyleBoxFlat:
@@ -205,8 +232,10 @@ func _menu_panel_style() -> StyleBoxFlat:
 func _on_size_chosen(px: int) -> void :
 	if _overlay != null and _overlay.has_method("set_brush_size"):
 		_overlay.set_brush_size(px)
+	_mark_current_size()
 	if _size_popup != null:
 		_size_popup.hide()
+
 
 
 # --- icon ------------------------------------------------------------------------------------
